@@ -1,7 +1,15 @@
 # Tier-1 CI. Lint runs on GitHub-hosted; build+test needs installed HPX so it runs
 # on the self-hosted Rostam runner. Perf gate lives in bench.yml (Rostam, on-demand).
+#
+# SECURITY (public repo + self-hosted runner): the build-test job must NEVER run
+# untrusted code on Rostam. It is guarded to run only on pushes and on PRs that
+# originate from a branch *in this repo* (not forks). Fork PRs skip it; a maintainer
+# vets and re-runs them deliberately.
 name: CI
 on: [push, pull_request]
+
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -15,6 +23,10 @@ jobs:
         continue-on-error: true   # bootstrap: informational; tighten to required later
 
   build-test:
+    # Only trusted events on the self-hosted Rostam runner (no fork code).
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, rostam]
     steps:
       - uses: actions/checkout@v4
