@@ -1,0 +1,36 @@
+# Tier-2 perf gate — runs on the self-hosted Rostam runner, on an EXCLUSIVE node.
+# Triggered manually (workflow_dispatch) or by adding the 'run-bench' label to a PR
+# (maintainer action). Seeds the perf measurement; the full 3-way (vs C++ baseline)
+# + scaling sweeps land with the per-op milestones.
+#
+# Security: only same-repo (non-fork) refs run on the runner.
+name: bench
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.label.name == 'run-bench' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, rostam]
+    steps:
+      - uses: actions/checkout@v4
+      - name: microbenchmark on an exclusive medusa node
+        run: |
+          srun --partition=medusa --nodes=1 --exclusive --time=0:20:00 --cpus-per-task=40 \
+            bash -c '
+              source env.sh
+              unset LD_PRELOAD
+              "$PY" -m pip install -e ".[test]" --no-cache-dir \
+                -C cmake.define.CMAKE_CXX_COMPILER=/opt/apps/gcc/15.1.0/bin/g++ \
+                -C cmake.define.CMAKE_PREFIX_PATH="$HPX_ROOT" \
+                -C cmake.define.HPX_DIR="$HPX_DIR" >/dev/null
+              LD_PRELOAD="$HPXPY_TCMALLOC" "$PY" benchmarks/microbench.py
+            '
