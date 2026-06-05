@@ -1,0 +1,24 @@
+# Tier-1 CI (fast checks). Build+test needs an installed HPX, so it runs on a
+# self-hosted Rostam runner (disabled until provisioned — see docs/PLAN.md §5b).
+# The perf gate lives in bench.yml (Rostam, on-label/nightly).
+name: CI
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install ruff
+      - run: ruff check hpxpy tests benchmarks
+        continue-on-error: true   # bootstrap: informational; tighten to required later
+
+  build-test:
+    # Requires installed HPX -> self-hosted Rostam runner. Enable once provisioned.
+    if: ${{ false }}
+    runs-on: [self-hosted, rostam]
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check.sh

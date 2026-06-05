@@ -1,0 +1,36 @@
+# hpxpy — NumPy-compatible Python arrays backed by HPX.
+# Build: scikit-build-core (PEP 517 backend) -> CMake -> nanobind extension.
+# SPDX-License-Identifier: MIT
+
+[build-system]
+requires = ["scikit-build-core>=0.9", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "hpxpy"
+version = "0.0.1"
+description = "NumPy-compatible Python arrays backed by the HPX C++ runtime"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Andrew Lumsdaine" }]
+dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-cov>=4"]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff", "nox"]
+
+[tool.scikit-build]
+minimum-version = "0.9"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["hpxpy"]
+# Point CMake at the installed HPX prefix via, e.g.:
+#   pip install -e . -C cmake.define.CMAKE_PREFIX_PATH=$HPX_ROOT
+[tool.scikit-build.cmake.define]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["hpxpy"]
