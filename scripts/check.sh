@@ -9,7 +9,7 @@ source env.sh >/dev/null
 unset LD_PRELOAD   # build must NOT preload tcmalloc
 
 echo "== build (scikit-build-core -> cmake -> nanobind, against HPX) =="
-"$PY" -m pip install -e . --no-cache-dir \
+"$PY" -m pip install -e ".[test]" --no-cache-dir \
   -C cmake.define.CMAKE_CXX_COMPILER=/opt/apps/gcc/15.1.0/bin/g++ \
   -C cmake.define.CMAKE_PREFIX_PATH="$HPX_ROOT" \
   -C cmake.define.HPX_DIR="$HPX_DIR"
