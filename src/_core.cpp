@@ -14,6 +14,8 @@
 #include <hpx/numeric.hpp>
 #include <hpx/execution.hpp>
 #include <hpx/version.hpp>
+#include <hpx/include/partitioned_vector_predef.hpp>
+#include <hpx/runtime_local/run_as_hpx_thread.hpp>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -118,6 +120,39 @@ double array_sum(nb::ndarray<nb::numpy, const double, nb::c_contig> a)
     return hpx::reduce(hpx::execution::par, data, data + n, 0.0);
 }
 
+// ---------------------------------------------------------------------------
+// Array — the core data type (#1): a 1-D float64 array backed by an HPX
+// partitioned_vector (one partition per locality to start). A THIN wrapper:
+// data stays in HPX, no copies, no reassembly. Construction runs on an HPX
+// thread (run_as_hpx_thread) because the Python main thread is not an HPX thread.
+// Operations (reductions, transforms) are wrapped HPX algorithms in later
+// milestones; NumPy interop is a separate, later phase (Phase 2) — not here.
+// ---------------------------------------------------------------------------
+using dvec = hpx::partitioned_vector<double>;
+
+class Array {
+public:
+    Array() = default;
+    Array(std::size_t n, double fill) : size_(n) {
+        hpx::run_as_hpx_thread([&] {
+            auto locs = hpx::find_all_localities();
+            data_ = std::make_shared<dvec>(n, fill, hpx::container_layout(locs));
+        });
+    }
+
+    std::size_t size() const { return size_; }
+    std::size_t ndim() const { return 1; }
+    std::size_t num_partitions() const {
+        return data_ ? data_->partitions().size() : 0;
+    }
+
+private:
+    std::shared_ptr<dvec> data_;
+    std::size_t size_ = 0;
+};
+
+Array zeros(std::size_t n) { return Array(n, 0.0); }
+
 }  // namespace
 
 NB_MODULE(_core, m)
@@ -130,4 +165,15 @@ NB_MODULE(_core, m)
           "Zero-copy parallel sum of a 1-D float64 array via hpx::reduce.");
     m.def("num_worker_threads", []() { return hpx::get_num_worker_threads(); });
     m.def("hpx_version", []() { return hpx::complete_version(); });
+
+    nb::class_<Array>(m, "Array")
+        .def_prop_ro("size", &Array::size)
+        .def_prop_ro("ndim", &Array::ndim)
+        .def_prop_ro("num_partitions", &Array::num_partitions)
+        .def("__len__", &Array::size)
+        .def("__repr__", [](Array const& a) {
+            return "Array(size=" + std::to_string(a.size()) +
+                   ", partitions=" + std::to_string(a.num_partitions()) + ")";
+        });
+    m.def("zeros", &zeros, "n"_a, "Create a partitioned Array of n zeros.");
 }

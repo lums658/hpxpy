@@ -12,17 +12,23 @@ at every iteration. This document is the contract for *how* we build it.
 
 ## 1. Vision & goals
 
-- **NumPy-replaceable** at the Python level: `arange`, `array`, `a*b`, `a@b`, `dot`,
-  reductions, slicing — familiar syntax.
-- **Backed by HPX**: every array operation is a real HPX parallel computation
-  (shared-memory now, distributed later) — no hidden serial fallbacks.
-- **Scales**: memory-bound ops approach the machine's bandwidth ceiling; compute-bound
-  ops approach core count. Measured against hand-written C++ HPX each iteration.
-- **Honest about overhead**: the abstraction penalty vs native C++ is measured, bounded,
-  and tracked over time — not discovered at the end.
+Built in **two phases** (see §8). **Phase 1 first: a thin, ~zero-overhead wrap of HPX.
+Phase 2 later: NumPy compatibility — and only after Phase 1 is validated.**
 
-Non-goals (initially): GPU, full NumPy API surface, distributed — these are later
-milestones, explicitly sequenced, not bolted on.
+- **Thin HPX wrapper, ~zero abstraction penalty**: the data structure *is*
+  `hpx::partitioned_vector`; operations *are* HPX algorithms over it. Data stays
+  partitioned — **no copies, no reassembly**. HPXPy ÷ hand-written C++ HPX ≈ 1.0,
+  measured every iteration against a C++ baseline.
+- **Backed by HPX**: every operation is a real HPX parallel computation (shared-memory
+  now, distributed later) — no hidden serial fallbacks.
+- **Scales**: memory-bound ops approach the machine's bandwidth ceiling; compute-bound
+  ops approach core count.
+- **NumPy-compatible (Phase 2)**: once the wrap is proven zero-overhead, add a zero-copy
+  NumPy bridge and a drop-in `np`-style API (`a*b`, `a@b`, `dot`, slicing) — as a
+  separate phase, not threaded through the core.
+
+Non-goals (Phase 1): NumPy compatibility, GPU, distributed — later, explicitly
+sequenced, not bolted on.
 
 ---
 
@@ -96,22 +102,25 @@ core is designed to make each one impossible-by-construction:
 Each iteration = one GitHub issue (mirrored as a beads node). **Definition of Done —
 four orthogonal axes** (each can be checked by an independent verifier agent):
 
-1. **Correctness & coverage** — pytest vs NumPy reference; edge cases
+1. **Correctness & coverage** — pytest vs analytic/reference values (Phase 1: NumPy only
+   as a *test oracle*, never in the library); edge cases
    (empty/1-elem/odd/big); numerical V&V (tolerances) + determinism check for parallel
    ops. **Coverage gate:** every public symbol has a test; line/branch coverage ≥ 90%
    (Python via pytest-cov; binding glue via llvm-cov where feasible). CI fails below.
 2. **Performance** — microbenchmark: raw throughput, **scalability** (vs threads
    {1,2,4,8,16,32,40}), and **abstraction penalty** (vs the C++ HPX baseline). Meets the
    iteration's perf threshold (§6) and **no regression** vs recorded numbers.
-3. **Niceness / NumPy parity** — the drop-in parity suite passes (same snippet under
-   `numpy` and `hpxpy` → same result, idiom works) + reviewer rubric (signatures match
-   `np`, broadcasting/dtype/error semantics).
+3. **(Phase 2 only) NumPy parity** — the drop-in parity suite passes (same snippet under
+   `numpy` and `hpxpy` → same result) + reviewer rubric. **Not a Phase-1 gate**; Phase 1's
+   headline gate is the abstraction penalty (axis 2).
 4. **Docs & hygiene** — every public symbol has a numpydoc docstring + type hints; the
    docs site builds; doc-coverage ≥ 95%; user-guide/example updated if user-facing; ADR
    for non-trivial choices; lint/format/type-check clean; results (numbers + plots)
    committed; issue/bead closed.
 
-Nothing merges without all four. Perf numbers are committed (CSV) so regressions show.
+Nothing merges without its gates: **Phase 1 = axes 1, 2, 4** (axis 2's abstraction-penalty
+check is the headline); Phase 2 adds axis 3. Perf numbers are committed (CSV) so
+regressions show.
 
 ---
 
@@ -230,19 +239,32 @@ defines the local==CI gate so "works locally" == "passes CI".
 
 ## 8. Phased roadmap (milestones, each gated by §5/§6)
 
-- **M0 — Substrate.** Repo + build (installed HPX) + CI skeleton + env.sh + test/bench
-  scaffolding + the C++ baseline harness. Exit: empty package builds & imports; CI green.
-- **M1 — Array core.** `Array` on `partitioned_vector`, NUMA-aware alloc, `arange/zeros/
-  from_numpy/to_numpy`. Exit: round-trips vs NumPy; alloc bandwidth ≈ STREAM.
-- **M2 — Reductions.** `sum`, `dot` (fused), `min/max/mean`. Exit: dot ≥60% C++, ≥8×
-  scaling; correctness.
-- **M3 — Fused elementwise.** lazy `a*b`, `a*x+y`, ufuncs; `a@b` (dot). Exit: `a*x+y`
-  single-pass, scales; no per-op temporary.
-- **M4 — Stencil/SpMV.** `gauss_seidel`, sparse matvec (NWGraph-relevant). Exit: scaling
-  vs C++ baseline.
-- **M5 — Distributed.** multi-locality arrays + collectives; strong/weak scaling across
-  nodes. Exit: G4-style multi-node results.
-- **M6 — Beyond.** GPU; HPyX (task-parallel) interop/merge; broader NumPy surface.
+### Phase 1 — Wrap HPX; validate zero abstraction penalty (NO NumPy in the data path)
+- **M0 — Substrate.** (done) Repo + build (installed HPX) + CI + `env.sh` + harness + C++
+  baseline. Exit: package builds & imports; CI green.
+- **M1 — Array core.** `Array` = `partitioned_vector` wrapper + introspection
+  (`size`/`ndim`/`num_partitions`) + HPX-native construction (`zeros`/fill; later iota),
+  NUMA-aware alloc. **No NumPy.** Exit: builds, constructs, partitions correctly.
+- **M2 — Reductions.** `reduce`/`sum`/`dot`/`min`/`max` as wrapped HPX algorithms. First
+  **zero-penalty validation** vs C++; correctness via analytic values. Exit: penalty ≈ 0,
+  scaling, correct.
+- **M3 — Transforms / element-wise** (+ `sort`/`scan`). In-place HPX algorithms; results
+  stay partitioned. Exit: penalty ≈ 0, scaling.
+- **M4 — Distributed.** multi-locality arrays + collectives; strong/weak scaling. Exit:
+  multi-node penalty/scaling.
+- **M5 — Stencil / SpMV** (NWGraph-relevant). Exit: scaling vs C++ baseline.
+
+**Phase-1 done** = a representative set of HPX ops wrapped with measured ~0 abstraction
+penalty vs C++ HPX. Only then →
+
+### Phase 2 — NumPy compatibility (separate; starts after Phase 1)
+- **Zero-copy bridge:** `from_numpy` (borrow) + `to_numpy` (zero-copy view; distributed
+  stays partitioned — explicit gather only if ever needed).
+- **NumPy-identical API:** operators, `dot`, broadcasting, dtype rules, slicing, errors.
+- **Drop-in parity suite** (`import hpxpy as np`) — this milestone's gate.
+
+### Later
+- GPU backend; HPyX (task-parallel) interop/merge.
 
 ---
 
