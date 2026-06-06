@@ -14,7 +14,7 @@
 #include <hpx/numeric.hpp>
 #include <hpx/execution.hpp>
 #include <hpx/version.hpp>
-#include <hpx/include/partitioned_vector_predef.hpp>
+#include <hpx/modules/compute_local.hpp>
 #include <hpx/runtime_local/run_as_hpx_thread.hpp>
 
 #include <nanobind/nanobind.h>
@@ -121,30 +121,29 @@ double array_sum(nb::ndarray<nb::numpy, const double, nb::c_contig> a)
 }
 
 // ---------------------------------------------------------------------------
-// Array — the core data type (#1): a 1-D float64 array backed by an HPX
-// partitioned_vector (one partition per locality to start). A THIN wrapper:
-// data stays in HPX, no copies, no reassembly. Construction runs on an HPX
-// thread (run_as_hpx_thread) because the Python main thread is not an HPX thread.
-// Operations (reductions, transforms) are wrapped HPX algorithms in later
-// milestones; NumPy interop is a separate, later phase (Phase 2) — not here.
+// Array — the core data type: a 1-D float64 array backed by an HPX compute::vector
+// with a NUMA-aware host block_allocator (parallel first-touch). A THIN wrapper:
+// HPX owns the storage. We allocate ONLY for genuinely new arrays — never a
+// between-layers/transport/gather buffer. Construction runs on an HPX thread
+// (run_as_hpx_thread) so the allocator's parallel first-touch executes on the HPX
+// thread pool. The buffer is contiguous, so NumPy interop (Phase 2) is a zero-copy
+// borrow — never a copy. Multi-locality distribution is a later collectives
+// layer (M4), over per-locality arrays; never a gather.
 // ---------------------------------------------------------------------------
-using dvec = hpx::partitioned_vector<double>;
+using numa_alloc = hpx::compute::host::block_allocator<double>;
+using dvec = hpx::compute::vector<double, numa_alloc>;
 
 class Array {
 public:
     Array() = default;
     Array(std::size_t n, double fill) : size_(n) {
         hpx::run_as_hpx_thread([&] {
-            auto locs = hpx::find_all_localities();
-            data_ = std::make_shared<dvec>(n, fill, hpx::container_layout(locs));
+            data_ = std::make_shared<dvec>(n, fill);  // NUMA-aware first-touch
         });
     }
 
     std::size_t size() const { return size_; }
     std::size_t ndim() const { return 1; }
-    std::size_t num_partitions() const {
-        return data_ ? data_->partitions().size() : 0;
-    }
 
 private:
     std::shared_ptr<dvec> data_;
@@ -169,11 +168,9 @@ NB_MODULE(_core, m)
     nb::class_<Array>(m, "Array")
         .def_prop_ro("size", &Array::size)
         .def_prop_ro("ndim", &Array::ndim)
-        .def_prop_ro("num_partitions", &Array::num_partitions)
         .def("__len__", &Array::size)
         .def("__repr__", [](Array const& a) {
-            return "Array(size=" + std::to_string(a.size()) +
-                   ", partitions=" + std::to_string(a.num_partitions()) + ")";
+            return "Array(size=" + std::to_string(a.size()) + ")";
         });
-    m.def("zeros", &zeros, "n"_a, "Create a partitioned Array of n zeros.");
+    m.def("zeros", &zeros, "n"_a, "Create an Array of n zeros (NUMA-aware).");
 }
