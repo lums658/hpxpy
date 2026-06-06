@@ -1,4 +1,4 @@
-"""M1 #1: the Array core — a thin wrapper over hpx::partitioned_vector.
+"""M1 #1: the Array core — a thin wrapper over a NUMA-aware HPX compute::vector.
 
 Phase 1 has no NumPy bridge, so these cover structure/lifecycle only; content
 correctness arrives with M2 reductions (checked against analytic values).
@@ -12,7 +12,6 @@ def test_zeros_basic():
     assert a.size == 1000
     assert a.ndim == 1
     assert len(a) == 1000
-    assert a.num_partitions >= 1
 
 
 def test_zeros_empty():

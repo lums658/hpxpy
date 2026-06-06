@@ -11,7 +11,7 @@ import numpy as _np
 
 from . import _core
 
-#: The core 1-D float64 array type, backed by an HPX partitioned_vector.
+#: The core 1-D float64 array type, backed by a NUMA-aware HPX compute::vector.
 Array = _core.Array
 
 __version__ = "0.0.1"
@@ -48,7 +48,7 @@ def sum(a) -> float:  # noqa: A001 - NumPy-style namespace
 
 
 def zeros(n: int) -> Array:
-    """Create a partitioned :class:`Array` of ``n`` zeros (HPX-distributed)."""
+    """Create an :class:`Array` of ``n`` zeros (NUMA-aware HPX allocation)."""
     return _core.zeros(int(n))
 
 

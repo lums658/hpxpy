@@ -15,9 +15,11 @@ at every iteration. This document is the contract for *how* we build it.
 Built in **two phases** (see §8). **Phase 1 first: a thin, ~zero-overhead wrap of HPX.
 Phase 2 later: NumPy compatibility — and only after Phase 1 is validated.**
 
-- **Thin HPX wrapper, ~zero abstraction penalty**: the data structure *is*
-  `hpx::partitioned_vector`; operations *are* HPX algorithms over it. Data stays
-  partitioned — **no copies, no reassembly**. HPXPy ÷ hand-written C++ HPX ≈ 1.0,
+- **Thin HPX wrapper, ~zero abstraction penalty**: the data structure *is* an HPX
+  container (`hpx::compute::vector` with a NUMA-aware `block_allocator` for the
+  single-locality core; a distributed layer added later in M4); operations *are* HPX
+  algorithms over it. Data stays in HPX — **no copies, no reassembly, no between-layers
+  buffers** (allocate only for genuinely new arrays). HPXPy ÷ hand-written C++ HPX ≈ 1.0,
   measured every iteration against a C++ baseline.
 - **Backed by HPX**: every operation is a real HPX parallel computation (shared-memory
   now, distributed later) — no hidden serial fallbacks.
@@ -38,10 +40,11 @@ These are the concrete defects found while benchmarking the existing bindings; t
 core is designed to make each one impossible-by-construction:
 
 1. **Two divergent array types** (contiguous Layer-1 + partitioned Layer-2). → ONE array
-   type, `partitioned_vector`-backed, used everywhere.
+   type, `hpx::compute::vector`-backed, used everywhere.
 2. **NUMA-naive allocation** (`std::vector::resize` zero-fills on one thread → all pages
-   on one socket). → allocation is uninitialized + **parallel first-touch**; never a
-   serial zero-fill on the hot path.
+   on one socket). → allocation goes through HPX's NUMA-aware `block_allocator`
+   (**parallel first-touch** via the HPX partitioner); never a serial zero-fill on the
+   hot path. Allocate only for genuinely new arrays — never a between-layers buffer.
 3. **No expression fusion** (`a*b` materializes a temporary; `sum(a*b)` is two passes). →
    **lazy/fused expression evaluation**; `dot`/compound ops are single-pass.
 4. **Eager per-op result allocation dominates** (new partitioned_vector per `a*b`). →
@@ -57,17 +60,20 @@ core is designed to make each one impossible-by-construction:
 
 ## 3. Core architecture (the redesign)
 
-- **Array type:** single `Array` backed by `hpx::partitioned_vector<T>` (T: float64
-  first; float32/int64 later). One partition per locality initially; layout abstracted.
-- **Allocation:** uninitialized storage + parallel first-touch via the initializing
-  HPX algorithm. A small allocation/first-touch utility used by every constructor.
+- **Array type:** single `Array` backed by `hpx::compute::vector<T, block_allocator<T>>`
+  (T: float64 first; float32/int64 later) — a contiguous, NUMA-aware, single-locality
+  container. Contiguity makes the eventual NumPy bridge a zero-copy borrow; the
+  distributed layer (M4) composes per-locality arrays via collectives, never a gather.
+- **Allocation:** HPX's NUMA-aware `block_allocator` performs parallel first-touch on the
+  HPX thread pool at construction (run via `run_as_hpx_thread`). Used by every
+  constructor; allocate only for genuinely new arrays, never a between-layers buffer.
 - **Expressions:** lazy expression templates (or a small expression IR) so `a*x + y`
   builds an unevaluated node and materializes in **one** fused `hpx::transform`/
   `for_loop` pass; reductions (`dot`, `sum`) fuse the transform into the reduce.
 - **Execution policy:** one policy model (`seq`/`par`/`par_unseq`), one place that owns
   the HPX runtime + thread count; default `par_unseq`.
-- **NumPy interop:** zero-copy where contiguous & single-locality; explicit gather for
-  `to_numpy` when partitioned/distributed.
+- **NumPy interop (Phase 2):** zero-copy borrow of the contiguous compute::vector buffer;
+  the distributed layer stays in HPX (explicit gather only if ever truly needed).
 - **Binding layer:** `DECIDE #2:` pybind11 (matches old code, what we know) vs nanobind
   (what HPyX uses; lighter, Py3.13 free-threading; eases eventual merge). Leaning
   **nanobind** to align with HPyX for the merge — but pybind11 is lower-risk/known.
@@ -242,14 +248,15 @@ defines the local==CI gate so "works locally" == "passes CI".
 ### Phase 1 — Wrap HPX; validate zero abstraction penalty (NO NumPy in the data path)
 - **M0 — Substrate.** (done) Repo + build (installed HPX) + CI + `env.sh` + harness + C++
   baseline. Exit: package builds & imports; CI green.
-- **M1 — Array core.** `Array` = `partitioned_vector` wrapper + introspection
-  (`size`/`ndim`/`num_partitions`) + HPX-native construction (`zeros`/fill; later iota),
-  NUMA-aware alloc. **No NumPy.** Exit: builds, constructs, partitions correctly.
+- **M1 — Array core.** `Array` = `hpx::compute::vector<double, block_allocator>` wrapper
+  + introspection (`size`/`ndim`) + HPX-native construction (`zeros`/fill; later iota),
+  NUMA-aware alloc via the block_allocator. **No NumPy.** Exit: builds, constructs,
+  NUMA-first-touched.
 - **M2 — Reductions.** `reduce`/`sum`/`dot`/`min`/`max` as wrapped HPX algorithms. First
   **zero-penalty validation** vs C++; correctness via analytic values. Exit: penalty ≈ 0,
   scaling, correct.
 - **M3 — Transforms / element-wise** (+ `sort`/`scan`). In-place HPX algorithms; results
-  stay partitioned. Exit: penalty ≈ 0, scaling.
+  stay in HPX. Exit: penalty ≈ 0, scaling.
 - **M4 — Distributed.** multi-locality arrays + collectives; strong/weak scaling. Exit:
   multi-node penalty/scaling.
 - **M5 — Stencil / SpMV** (NWGraph-relevant). Exit: scaling vs C++ baseline.
