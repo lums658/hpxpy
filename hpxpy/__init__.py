@@ -11,6 +11,9 @@ import numpy as _np
 
 from . import _core
 
+#: The core 1-D float64 array type, backed by an HPX partitioned_vector.
+Array = _core.Array
+
 __version__ = "0.0.1"
 
 _initialized = False
@@ -36,8 +39,17 @@ atexit.register(finalize)
 
 
 def sum(a) -> float:  # noqa: A001 - NumPy-style namespace
-    """Parallel sum of a 1-D array via HPX (zero-copy for float64 C-contiguous)."""
-    return _core.array_sum(_np.ascontiguousarray(a, dtype=_np.float64).ravel())
+    """Parallel sum of a 1-D float64 C-contiguous array via HPX (zero-copy).
+
+    The input buffer is borrowed, never copied: a non-contiguous or non-float64
+    array raises ``TypeError`` rather than being silently converted/copied.
+    """
+    return _core.array_sum(a)
+
+
+def zeros(n: int) -> Array:
+    """Create a partitioned :class:`Array` of ``n`` zeros (HPX-distributed)."""
+    return _core.zeros(int(n))
 
 
 def num_worker_threads() -> int:
@@ -53,6 +65,8 @@ def hpx_version() -> str:
 __all__ = [
     "init",
     "finalize",
+    "Array",
+    "zeros",
     "sum",
     "num_worker_threads",
     "hpx_version",

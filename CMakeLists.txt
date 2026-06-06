@@ -26,7 +26,11 @@ message(STATUS "hpxpy: found HPX ${HPX_VERSION} at ${HPX_DIR}")
 
 # --- The extension ----------------------------------------------------------
 nanobind_add_module(_core src/_core.cpp)
-target_link_libraries(_core PRIVATE HPX::hpx HPX::wrap_main HPX::iostreams_component)
+target_link_libraries(_core PRIVATE
+  HPX::hpx
+  HPX::wrap_main
+  HPX::iostreams_component
+  HPX::partitioned_vector_component)  # partitioned_vector ctor + segmented algos
 target_compile_features(_core PRIVATE cxx_std_20)
 
 install(TARGETS _core LIBRARY DESTINATION hpxpy)
