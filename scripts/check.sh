@@ -15,9 +15,10 @@ echo "== build (scikit-build-core -> cmake -> nanobind, against HPX) =="
   -C cmake.define.HPX_DIR="$HPX_DIR"
 
 echo "== lint (ruff, if available) =="
-"$PY" -m ruff check hpxpy tests 2>/dev/null || echo "(ruff not installed - skipped)"
+"$PY" -m ruff check hpxpy benchmarks tests 2>/dev/null || echo "(ruff not installed - skipped)"
 
 echo "== tests + coverage (tcmalloc preloaded at runtime) =="
-LD_PRELOAD="$HPXPY_TCMALLOC" "$PY" -m pytest --cov=hpxpy --cov-report=term-missing
+LD_PRELOAD="$HPXPY_TCMALLOC" "$PY" -m pytest \
+  --cov=hpxpy --cov=benchmarks --cov-report=term-missing
 
 echo "== OK =="

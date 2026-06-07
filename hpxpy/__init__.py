@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import atexit
 
-import numpy as _np
-
 from . import _core
 
 #: The core 1-D float64 array type, backed by a NUMA-aware HPX compute::vector.
