@@ -178,6 +178,32 @@ NB_MODULE(_core, m)
         .def("__truediv__", [](Array const& a, Array const& b) {
             nb::gil_scoped_release r; return a.div(b);
         })
+        // Scalar broadcast: a ⊙ s and the reflected s ⊙ a (one unary transform).
+        // nanobind tries the Array×Array overloads above first, then these.
+        .def("__add__", [](Array const& a, double s) {
+            nb::gil_scoped_release r; return a.add_scalar(s);
+        })
+        .def("__radd__", [](Array const& a, double s) {
+            nb::gil_scoped_release r; return a.add_scalar(s);
+        })
+        .def("__sub__", [](Array const& a, double s) {
+            nb::gil_scoped_release r; return a.sub_scalar(s);
+        })
+        .def("__rsub__", [](Array const& a, double s) {
+            nb::gil_scoped_release r; return a.rsub_scalar(s);    // s - a
+        })
+        .def("__mul__", [](Array const& a, double s) {
+            nb::gil_scoped_release r; return a.mul_scalar(s);
+        })
+        .def("__rmul__", [](Array const& a, double s) {
+            nb::gil_scoped_release r; return a.mul_scalar(s);
+        })
+        .def("__truediv__", [](Array const& a, double s) {
+            nb::gil_scoped_release r; return a.div_scalar(s);
+        })
+        .def("__rtruediv__", [](Array const& a, double s) {
+            nb::gil_scoped_release r; return a.rdiv_scalar(s);    // s / a
+        })
         .def("__len__", &Array::size)
         .def("__repr__", [](Array const& a) {
             return "Array(size=" + std::to_string(a.size()) + ")";

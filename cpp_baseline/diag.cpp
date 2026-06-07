@@ -37,6 +37,8 @@ struct config
     double budget = 0.5;
     int min_reps = 5;
     int max_reps = 200;
+    double scalar = 2.0;    // runtime (set via --scalar) so neither L0 nor L1 can
+                            // constant-fold it — a FAIR scalar-op ladder.
 };
 
 config g_cfg;
@@ -80,10 +82,18 @@ double l0(std::string const& op, double const* p, double const* q, std::size_t n
             [](double x, double y) { return x > y ? x : y; });
     if (op == "dot")
         return hpx::transform_reduce(hpx::execution::par, p, p + n, q, 0.0);
-    // element-wise: new result buffer + one transform pass, return out[0].
-    hpxpy::dvec out(n);
-    double* o = out.data();
-    if (op == "add")
+    // element-wise / scalar: new result buffer + one transform pass, return out[0].
+    // Allocate the result the SAME way the wrapper does (make_shared<dvec>) so the
+    // ladder isolates the wrapper call, not the allocation path.
+    auto outp = std::make_shared<hpxpy::dvec>(n);
+    double* o = outp->data();
+    if (op == "muls")    // scalar broadcast (unary transform): x * s (runtime s)
+    {
+        double const s = g_cfg.scalar;
+        hpx::transform(hpx::execution::par, p, p + n, o,
+            [s](double x) { return x * s; });
+    }
+    else if (op == "add")
         hpx::transform(hpx::execution::par, p, p + n, q, o, std::plus<double>{});
     else if (op == "sub")
         hpx::transform(hpx::execution::par, p, p + n, q, o, std::minus<double>{});
@@ -108,7 +118,9 @@ double l1(std::string const& op, hpxpy::Array const& a, hpxpy::Array const& b)
     if (op == "dot")
         return a.dot(b);
     hpxpy::Array res;
-    if (op == "add")
+    if (op == "muls")    // scalar broadcast (the exact wrapper method)
+        res = a.mul_scalar(g_cfg.scalar);
+    else if (op == "add")
         res = a.add(b);
     else if (op == "sub")
         res = a.sub(b);
@@ -183,6 +195,8 @@ int main(int argc, char** argv)
             g_cfg.min_reps = std::stoi(next());
         else if (a == "--max-reps")
             g_cfg.max_reps = std::stoi(next());
+        else if (a == "--scalar")
+            g_cfg.scalar = std::stod(next());
     }
     if (g_cfg.sizes.empty())
     {
