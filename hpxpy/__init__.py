@@ -50,6 +50,16 @@ def zeros(n: int) -> Array:
     return _core.zeros(int(n))
 
 
+def full(n: int, value: float) -> Array:
+    """Create an :class:`Array` of ``n`` elements set to ``value`` (NUMA-aware)."""
+    return _core.full(int(n), float(value))
+
+
+def arange(n: int) -> Array:
+    """Create an :class:`Array` ``[0, 1, ..., n-1]`` (NUMA-aware first-touch)."""
+    return _core.arange(int(n))
+
+
 def num_worker_threads() -> int:
     """Number of HPX worker threads in the running runtime."""
     return _core.num_worker_threads()
@@ -65,6 +75,8 @@ __all__ = [
     "finalize",
     "Array",
     "zeros",
+    "full",
+    "arange",
     "sum",
     "num_worker_threads",
     "hpx_version",
