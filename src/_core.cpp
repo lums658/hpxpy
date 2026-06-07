@@ -14,17 +14,19 @@
 #include <hpx/numeric.hpp>
 #include <hpx/execution.hpp>
 #include <hpx/version.hpp>
-#include <hpx/modules/compute_local.hpp>
-#include <hpx/runtime_local/run_as_hpx_thread.hpp>
+
+#include "array.hpp"
+#include "timing.hpp"
 
 #include <nanobind/nanobind.h>
-#include <nanobind/ndarray.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 
 #include <condition_variable>
 #include <cstdlib>
-#include <mutex>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace nb = nanobind;
@@ -110,87 +112,67 @@ void finalize_runtime()
     }
 }
 
-// Zero-copy spike: sum a NumPy array via an HPX parallel reduction. The buffer
-// is borrowed directly from NumPy (no copy); the GIL is released while HPX runs.
-double array_sum(nb::ndarray<nb::numpy, const double, nb::c_contig> a)
-{
-    const double* data = a.data();
-    std::size_t n = a.size();
-    nb::gil_scoped_release release;
-    return hpx::reduce(hpx::execution::par, data, data + n, 0.0);
-}
-
 // ---------------------------------------------------------------------------
-// Array — the core data type: a 1-D float64 array backed by an HPX compute::vector
-// with a NUMA-aware host block_allocator (parallel first-touch). A THIN wrapper:
-// HPX owns the storage. We allocate ONLY for genuinely new arrays — never a
-// between-layers/transport/gather buffer. Construction runs on an HPX thread
-// (run_as_hpx_thread) so the allocator's parallel first-touch executes on the HPX
-// thread pool. The buffer is contiguous, so NumPy interop (Phase 2) is a zero-copy
-// borrow — never a copy. Multi-locality distribution is a later collectives
-// layer (M4), over per-locality arrays; never a gather.
+// Array — the core data type. Defined in array.hpp as a binding-agnostic C++/HPX
+// wrapper so the bindings AND the C++ abstraction-penalty diagnostic share the
+// exact same code. GIL handling lives HERE, at the binding layer (see the call
+// sites below), not inside the wrapper.
 // ---------------------------------------------------------------------------
-using numa_alloc = hpx::compute::host::block_allocator<double>;
-using dvec = hpx::compute::vector<double, numa_alloc>;
-
-class Array {
-public:
-    Array() = default;
-    Array(std::size_t n, double fill) : size_(n) {
-        hpx::run_as_hpx_thread([&] {
-            data_ = std::make_shared<dvec>(n, fill);  // NUMA-aware first-touch
-        });
-    }
-
-    std::size_t size() const { return size_; }
-    std::size_t ndim() const { return 1; }
-
-    // 0, 1, 2, ..., n-1. The block_allocator first-touches at construction; the
-    // parallel for_loop writes the ramp on the same HPX workers (stays NUMA-local).
-    static Array iota(std::size_t n) {
-        Array a;
-        a.size_ = n;
-        hpx::run_as_hpx_thread([&] {
-            a.data_ = std::make_shared<dvec>(n);
-            double* p = a.data_->data();
-            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
-                [p](std::size_t i) { p[i] = static_cast<double>(i); });
-        });
-        return a;
-    }
-
-private:
-    std::shared_ptr<dvec> data_;
-    std::size_t size_ = 0;
-};
-
-Array zeros(std::size_t n) { return Array(n, 0.0); }
-Array full(std::size_t n, double value) { return Array(n, value); }
-Array arange(std::size_t n) { return Array::iota(n); }
+using hpxpy::Array;
 
 }  // namespace
 
 NB_MODULE(_core, m)
 {
-    m.doc() = "hpxpy._core — M0 substrate (managed HPX runtime + zero-copy spike)";
+    m.doc() = "hpxpy._core — managed HPX runtime + the Array type and HPX reductions";
     m.def("init_runtime", &init_runtime, "num_threads"_a = 0,
           "Start the HPX runtime (num_threads<=0 => all cores).");
     m.def("finalize_runtime", &finalize_runtime, "Stop the HPX runtime.");
-    m.def("array_sum", &array_sum, "a"_a,
-          "Zero-copy parallel sum of a 1-D float64 array via hpx::reduce.");
     m.def("num_worker_threads", []() { return hpx::get_num_worker_threads(); });
     m.def("hpx_version", []() { return hpx::complete_version(); });
 
+    // Reductions release the GIL around the HPX work (the wrapper itself is
+    // GIL-agnostic). std::invalid_argument from min()/max() maps to ValueError.
     nb::class_<Array>(m, "Array")
         .def_prop_ro("size", &Array::size)
         .def_prop_ro("ndim", &Array::ndim)
+        .def("sum", [](Array const& a) {
+            nb::gil_scoped_release release;
+            return a.sum();
+        }, "Parallel sum (hpx::reduce).")
+        .def("min", [](Array const& a) {
+            nb::gil_scoped_release release;
+            return a.min();
+        }, "Parallel minimum (empty -> ValueError).")
+        .def("max", [](Array const& a) {
+            nb::gil_scoped_release release;
+            return a.max();
+        }, "Parallel maximum (empty -> ValueError).")
         .def("__len__", &Array::size)
         .def("__repr__", [](Array const& a) {
             return "Array(size=" + std::to_string(a.size()) + ")";
         });
-    m.def("zeros", &zeros, "n"_a, "Create an Array of n zeros (NUMA-aware).");
-    m.def("full", &full, "n"_a, "value"_a,
+    // C++-timed benchmark entry point: times a reduction in C++ (monotonic clock,
+    // adaptive repeats) with the GIL released, so the perf harness never times
+    // across the Python boundary. Returns (median_seconds, reps).
+    m.def("bench", [](Array const& a, std::string const& op, double budget,
+                      int min_reps, int max_reps) {
+        nb::gil_scoped_release release;
+        auto run = [&]() -> double {
+            if (op == "sum") return a.sum();
+            if (op == "min") return a.min();
+            if (op == "max") return a.max();
+            throw std::invalid_argument("unknown op: " + op);
+        };
+        hpxpy::timing::result r =
+            hpxpy::timing::measure(run, budget, min_reps, max_reps);
+        return std::make_pair(r.median_s, r.reps);
+    }, "a"_a, "op"_a, "budget"_a = 0.5, "min_reps"_a = 5, "max_reps"_a = 200,
+       "C++-timed median-of-times (s) and rep count for a reduction.");
+
+    m.def("zeros", &hpxpy::zeros, "n"_a, "Create an Array of n zeros (NUMA-aware).");
+    m.def("full", &hpxpy::full, "n"_a, "value"_a,
           "Create an Array of n elements set to value (NUMA-aware).");
-    m.def("arange", &arange, "n"_a,
+    m.def("arange", &hpxpy::arange, "n"_a,
           "Create an Array [0, 1, ..., n-1] (NUMA-aware parallel first-touch).");
 }

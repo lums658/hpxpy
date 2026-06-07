@@ -1,8 +1,9 @@
-"""Unit tests for the microbenchmark runner's pure measurement/aggregation core.
+"""Unit tests for the microbenchmark runner's pure aggregation core.
 
-These exercise the import-light logic (no HPX, no subprocess): timing, throughput,
-arg parsing, CSV, abstraction penalty, and scaling. The HPX/subprocess/CLI shell
-is integration glue (marked no-cover) and validated by running an actual sweep.
+These exercise the import-light logic (no HPX, no subprocess): throughput, arg
+parsing, CSV, abstraction penalty, and scaling. Timing itself lives in C++
+(src/timing.hpp); the HPX/subprocess/CLI shell is integration glue (no-cover),
+validated by running an actual sweep.
 """
 import csv
 
@@ -13,45 +14,11 @@ from benchmarks.runner import (
     Measurement,
     abstraction_penalty,
     gelem_per_s,
-    median_time,
     parse_sizes,
     parse_threads,
     scaling,
     write_csv,
 )
-
-
-# --- median_time ------------------------------------------------------------
-
-def test_median_time_counts_calls():
-    calls = {"warmup": 0, "timed": 0}
-
-    def fn():
-        calls["timed"] += 1
-
-    med = median_time(fn, warmup=2, repeats=5)
-    assert med >= 0.0
-    # warmup runs are untimed but still invoked
-    assert calls["timed"] == 2 + 5
-
-
-def test_median_time_is_median_not_mean():
-    # 5 runs with one large outlier: median ignores it, mean would not.
-    sleeps = iter([0.0, 0.0, 0.0, 0.0, 0.05])
-
-    def fn():
-        import time
-        time.sleep(next(sleeps))
-
-    med = median_time(fn, warmup=0, repeats=5)
-    assert med < 0.01  # the 0.05 outlier did not pull the median up
-
-
-def test_median_time_rejects_bad_args():
-    with pytest.raises(ValueError):
-        median_time(lambda: None, repeats=0)
-    with pytest.raises(ValueError):
-        median_time(lambda: None, warmup=-1)
 
 
 # --- gelem_per_s ------------------------------------------------------------

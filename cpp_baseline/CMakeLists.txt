@@ -16,5 +16,13 @@ message(STATUS "cpp_baseline: found HPX ${HPX_VERSION} at ${HPX_DIR}")
 # We call hpx::init() explicitly from our own main(), so do NOT link HPX::wrap_main
 # (which would hijack main). compute_local lives in HPX::hpx core.
 add_executable(bench bench.cpp)
+target_include_directories(bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(bench PRIVATE HPX::hpx)
 target_compile_features(bench PRIVATE cxx_std_20)
+
+# diag — the in-binary abstraction-penalty ladder (L0 direct vs L1 the wrapper).
+# Includes the SAME src/array.hpp the bindings use, so L1 is the exact wrapper code.
+add_executable(diag diag.cpp)
+target_include_directories(diag PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(diag PRIVATE HPX::hpx)
+target_compile_features(diag PRIVATE cxx_std_20)
