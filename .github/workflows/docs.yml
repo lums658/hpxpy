@@ -1,0 +1,50 @@
+# Sphinx docs. Built on the self-hosted Rostam runner because autodoc imports hpxpy
+# (loads the _core extension, which links HPX — needs env.sh's LD_LIBRARY_PATH; no
+# HPX runtime is started). The build runs on every PR (a gate: sphinx -W treats
+# warnings, incl. autodoc issues, as errors). Publishing to GitHub Pages happens
+# only on merge to main.
+#
+# Security: only same-repo (non-fork) refs run on the runner.
+name: docs
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, rostam]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build sphinx docs (-W treats warnings as errors)
+        run: |
+          source env.sh
+          unset LD_PRELOAD
+          "$PY" -m pip install -e ".[docs]" --no-cache-dir \
+            -C cmake.define.CMAKE_CXX_COMPILER=/opt/apps/gcc/15.1.0/bin/g++ \
+            -C cmake.define.CMAKE_PREFIX_PATH="$HPX_ROOT" \
+            -C cmake.define.HPX_DIR="$HPX_DIR" >/dev/null
+          "$PY" -m sphinx -b html -W docs docs/_build/html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  deploy:
+    # Publish only the released main branch.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
