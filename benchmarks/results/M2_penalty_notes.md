@@ -8,18 +8,20 @@ same algorithm, same NUMA-aware substrate, same threads.
 Zero abstraction penalty for `sum`/`min`/`max` over `Array` (n=1e8, exclusive
 medusa node, both sides timed by the shared C++ harness `src/timing.hpp`):
 
-| threads | sum | min | max |
-|--------:|----:|----:|----:|
-| 1  | 1.000 | 1.000 | 0.999 |
-| 2  | 1.001 | 0.999 | 0.998 |
-| 4  | 1.001 | 1.001 | 1.002 |
-| 8  | 1.000 | 1.000 | 1.000 |
-| 16 | 1.003 | 1.000 | 1.008 |
-| 32 | 0.980 | 1.009 | 0.979 |
-| 40 | 1.027 | 1.026 | 1.029 |
+| threads | sum | min | max | dot |
+|--------:|----:|----:|----:|----:|
+| 1  | 1.000 | 1.000 | 0.999 | 0.998 |
+| 2  | 1.001 | 0.999 | 0.998 | 0.997 |
+| 4  | 1.001 | 1.001 | 1.002 | 0.999 |
+| 8  | 1.000 | 1.000 | 1.000 | 1.009 |
+| 16 | 1.003 | 1.000 | 1.008 | 1.013 |
+| 32 | 0.980 | 1.009 | 0.979 | 1.003 |
+| 40 | 1.027 | 1.026 | 1.029 | 1.010 |
 
-(penalty = hpxpy median ÷ cpp median; ≈1.0 = none. Raw CSVs: `m2_{sum,min,max}.csv`.)
-Throughput scales 0.72 → 18.4 GEl/s (1 → 40 threads, n=1e8) — memory-bandwidth bound.
+(penalty = hpxpy median ÷ cpp median; ≈1.0 = none. Raw CSVs: `m2_{sum,min,max,dot}.csv`.)
+Throughput scales 0.72 → 18.4 GEl/s for sum (1 → 40 threads, n=1e8); dot 0.65 → 11
+GEl/s — all memory-bandwidth bound. `dot` is a single fused `transform_reduce` pass
+(no materialized product temporary); its in-binary ladder is L1/L0 = 1.000–1.003.
 
 ## How it was found (the value of this exercise)
 

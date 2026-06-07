@@ -57,6 +57,15 @@ def max(a: Array) -> float:  # noqa: A001 - NumPy-style namespace
     return a.max()
 
 
+def dot(a: Array, b: Array) -> float:
+    """Fused dot product of two :class:`Array` (single-pass ``transform_reduce``).
+
+    NumPy-style alias for :meth:`Array.dot` (``hpx.dot(a, b)`` ≡ ``a.dot(b)``);
+    one kernel in C++. Mismatched sizes raise ``ValueError``.
+    """
+    return a.dot(b)
+
+
 def zeros(n: int) -> Array:
     """Create an :class:`Array` of ``n`` zeros (NUMA-aware HPX allocation)."""
     return _core.zeros(int(n))
@@ -92,6 +101,7 @@ __all__ = [
     "sum",
     "min",
     "max",
+    "dot",
     "num_worker_threads",
     "hpx_version",
     "__version__",

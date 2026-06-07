@@ -162,7 +162,7 @@ def scaling(measurements, impl: str = IMPL_HPXPY) -> list[dict]:
 
 def available_ops() -> list[str]:
     """Names the runner can measure. Grows as milestones add Array operations."""
-    return ["sum", "min", "max"]
+    return ["sum", "min", "max", "dot"]
 
 
 def run_points(op, sizes, threads, budget, min_reps, max_reps):  # pragma: no cover - HPX
@@ -181,7 +181,10 @@ def run_points(op, sizes, threads, budget, min_reps, max_reps):  # pragma: no co
     out = []
     for n in sizes:
         a = hpx.arange(n)
-        median_s, reps = _core.bench(a, op, budget, min_reps, max_reps)
+        if op == "dot":
+            median_s, reps = _core.bench_dot(a, hpx.arange(n), budget, min_reps, max_reps)
+        else:
+            median_s, reps = _core.bench(a, op, budget, min_reps, max_reps)
         out.append((Measurement(op=op, n=n, threads=actual, impl=IMPL_HPXPY,
                                 median_s=median_s), reps))
     return out

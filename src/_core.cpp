@@ -148,6 +148,10 @@ NB_MODULE(_core, m)
             nb::gil_scoped_release release;
             return a.max();
         }, "Parallel maximum (empty -> ValueError).")
+        .def("dot", [](Array const& a, Array const& b) {
+            nb::gil_scoped_release release;
+            return a.dot(b);
+        }, "b"_a, "Fused dot product (single-pass transform_reduce).")
         .def("__len__", &Array::size)
         .def("__repr__", [](Array const& a) {
             return "Array(size=" + std::to_string(a.size()) + ")";
@@ -169,6 +173,16 @@ NB_MODULE(_core, m)
         return std::make_pair(r.median_s, r.reps);
     }, "a"_a, "op"_a, "budget"_a = 0.5, "min_reps"_a = 5, "max_reps"_a = 200,
        "C++-timed median-of-times (s) and rep count for a reduction.");
+
+    // Two-operand variant for dot (fused transform_reduce), same C++ timing.
+    m.def("bench_dot", [](Array const& a, Array const& b, double budget,
+                          int min_reps, int max_reps) {
+        nb::gil_scoped_release release;
+        hpxpy::timing::result r = hpxpy::timing::measure(
+            [&]() -> double { return a.dot(b); }, budget, min_reps, max_reps);
+        return std::make_pair(r.median_s, r.reps);
+    }, "a"_a, "b"_a, "budget"_a = 0.5, "min_reps"_a = 5, "max_reps"_a = 200,
+       "C++-timed median-of-times (s) and rep count for dot(a, b).");
 
     m.def("zeros", &hpxpy::zeros, "n"_a, "Create an Array of n zeros (NUMA-aware).");
     m.def("full", &hpxpy::full, "n"_a, "value"_a,
