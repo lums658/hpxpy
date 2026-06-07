@@ -27,3 +27,27 @@ compute the abstraction penalty (hpxpy median ÷ this binary's median).
   ```
   `threads` is the ACTUAL worker count after the runtime clamps the request;
   `impl` must be `"cpp"`. Lines not starting with `{` are ignored by the runner.
+  `bench.cpp` also emits a `"value"` key (the computed result) for analytic
+  cross-checking; the runner ignores it.
+
+`bench.cpp` implements `sum`/`min`/`max`/`dot` over the same NUMA-aware
+`compute::vector<double, block_allocator<double>>` substrate as hpxpy's Array.
+
+## Build & run
+
+```bash
+source ../env.sh                # gcc 15 / HPX / Boost on Rostam
+unset LD_PRELOAD                # do NOT preload tcmalloc during the build
+cmake -S . -B build -G Ninja \
+  -DCMAKE_CXX_COMPILER=/opt/apps/gcc/15.1.0/bin/g++ \
+  -DCMAKE_PREFIX_PATH="$HPX_ROOT" -DHPX_DIR="$HPX_DIR"
+cmake --build build
+
+# direct (one JSON line per size):
+LD_PRELOAD="$HPXPY_TCMALLOC" ./build/bench --op sum --sizes 1e7 --threads 8
+
+# as the abstraction-penalty denominator in a full sweep:
+LD_PRELOAD="$HPXPY_TCMALLOC" python -m benchmarks.runner sweep \
+  --op sum --sizes 1e6,1e7,1e8 --threads 1,2,4,8,16,32,40 \
+  --baseline ./cpp_baseline/build/bench --out results.csv
+```
