@@ -63,8 +63,9 @@ std::vector<std::size_t> parse_sizes(std::string const& spec)
     return out;
 }
 
-// L0 — direct HPX reduce over a raw pointer (mirrors hpxpy::Array's reduce bodies).
-double l0(std::string const& op, double const* p, std::size_t n)
+// L0 — direct HPX algorithm over raw pointers (mirrors hpxpy::Array's bodies).
+// q is the second operand for dot (nullptr otherwise).
+double l0(std::string const& op, double const* p, double const* q, std::size_t n)
 {
     if (op == "sum")
         return hpx::reduce(hpx::execution::par, p, p + n, 0.0);
@@ -76,11 +77,13 @@ double l0(std::string const& op, double const* p, std::size_t n)
         return hpx::reduce(hpx::execution::par, p, p + n,
             -std::numeric_limits<double>::infinity(),
             [](double x, double y) { return x > y ? x : y; });
+    if (op == "dot")
+        return hpx::transform_reduce(hpx::execution::par, p, p + n, q, 0.0);
     std::exit(2);
 }
 
 // L1 — the exact wrapper method.
-double l1(std::string const& op, hpxpy::Array const& a)
+double l1(std::string const& op, hpxpy::Array const& a, hpxpy::Array const& b)
 {
     if (op == "sum")
         return a.sum();
@@ -88,6 +91,8 @@ double l1(std::string const& op, hpxpy::Array const& a)
         return a.min();
     if (op == "max")
         return a.max();
+    if (op == "dot")
+        return a.dot(b);
     std::exit(2);
 }
 
@@ -96,20 +101,22 @@ int hpx_main(int, char**)
     int const threads = static_cast<int>(hpx::get_num_worker_threads());
     for (std::size_t n : g_cfg.sizes)
     {
-        // ONE Array, built once; both rungs reduce its SAME buffer. Timed by the
+        // Arrays built once; both rungs operate on the SAME buffers. Timed by the
         // shared C++ harness (hpxpy::timing) — identical to how the extension and
-        // the cross-process baseline are timed.
+        // the cross-process baseline are timed. dot needs a second operand.
         hpxpy::Array a = hpxpy::arange(n);
+        hpxpy::Array b = (g_cfg.op == "dot") ? hpxpy::arange(n) : hpxpy::Array();
         double const* p = a.data();
+        double const* q = b.data();
 
         hpxpy::timing::result r0 = hpxpy::timing::measure(
-            [&] { return l0(g_cfg.op, p, n); },
+            [&] { return l0(g_cfg.op, p, q, n); },
             g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
         hpxpy::timing::result r1 = hpxpy::timing::measure(
-            [&] { return l1(g_cfg.op, a); },
+            [&] { return l1(g_cfg.op, a, b); },
             g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
-        double v0 = l0(g_cfg.op, p, n);
-        double v1 = l1(g_cfg.op, a);
+        double v0 = l0(g_cfg.op, p, q, n);
+        double v1 = l1(g_cfg.op, a, b);
 
         double t0 = r0.median_s, t1 = r1.median_s;
         double g0 = t0 > 0 ? n / t0 / 1e9 : 0.0;

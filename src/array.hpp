@@ -86,6 +86,18 @@ public:
             -std::numeric_limits<double>::infinity(),
             [](double x, double y) { return x > y ? x : y; });
     }
+    // Fused dot product: a SINGLE pass (multiply+accumulate) via transform_reduce —
+    // never a materialized product array then a sum.
+    double dot(Array const& other) const
+    {
+        if (size_ != other.size_)
+            throw std::invalid_argument("dot(): size mismatch");
+        if (size_ == 0)
+            return 0.0;
+        const double* p = data_->data();
+        const double* q = other.data_->data();
+        return hpx::transform_reduce(hpx::execution::par, p, p + size_, q, 0.0);
+    }
 
     // 0, 1, 2, ..., n-1. The block_allocator first-touches at construction; the
     // parallel for_loop writes the ramp on the same HPX workers (stays NUMA-local).

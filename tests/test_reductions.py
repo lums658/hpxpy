@@ -56,3 +56,32 @@ def test_min_max_empty_raises():
         a.min()
     with pytest.raises(ValueError):
         a.max()
+
+
+# --- dot --------------------------------------------------------------------
+
+@pytest.mark.parametrize("n", [1, 2, 1000, 1001, 1_000_000])
+def test_dot_arange_is_sum_of_squares(n):
+    # dot(0..n-1, 0..n-1) = sum i^2 = (n-1)n(2n-1)/6  (exact in float64 for these n)
+    expected = (n - 1) * n * (2 * n - 1) / 6
+    assert hpx.arange(n).dot(hpx.arange(n)) == pytest.approx(expected, rel=1e-12)
+
+
+def test_dot_full_is_n_times_cd():
+    a = hpx.full(1000, 2.0)
+    b = hpx.full(1000, 3.0)
+    assert a.dot(b) == pytest.approx(1000 * 2.0 * 3.0, rel=1e-12)
+
+
+def test_dot_empty_is_zero():
+    assert hpx.arange(0).dot(hpx.arange(0)) == 0.0
+
+
+def test_dot_method_and_free_function_agree():
+    a, b = hpx.arange(5000), hpx.arange(5000)
+    assert hpx.dot(a, b) == a.dot(b)
+
+
+def test_dot_size_mismatch_raises():
+    with pytest.raises(ValueError):
+        hpx.arange(10).dot(hpx.arange(11))
