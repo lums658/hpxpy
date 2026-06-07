@@ -24,7 +24,7 @@ jobs:
     runs-on: [self-hosted, rostam]
     steps:
       - uses: actions/checkout@v4
-      - name: build sphinx docs (-W: warnings are errors)
+      - name: build sphinx docs (-W treats warnings as errors)
         run: |
           source env.sh
           unset LD_PRELOAD
