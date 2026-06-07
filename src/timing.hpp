@@ -33,14 +33,24 @@ struct result
     int reps;
 };
 
-// f must return double (the kernel's result); it is accumulated into a volatile
-// sink OUTSIDE the timed region so the optimizer cannot elide the call.
+// Keep a value observable so the optimizer cannot elide the call that produced it
+// (the "DoNotOptimize" trick). Works for any type — double from a reduction, or an
+// Array from a transform — via a memory clobber on the object's storage.
+template <typename T>
+inline void keep(T const& x)
+{
+    asm volatile("" : : "m"(x) : "memory");
+}
+
+// Time any callable f(); its result type is irrelevant (kept observable outside the
+// timed region). Used by reductions (return double) and transforms (return Array).
 template <typename F>
 inline result measure(F&& f, double budget_s, int min_reps, int max_reps)
 {
-    volatile double sink = 0.0;
-
-    sink = sink + f();    // warmup (caches / first-touch), untimed
+    {
+        auto warm = f();    // warmup (caches / first-touch), untimed
+        keep(warm);
+    }
 
     std::vector<double> ts;
     double total = 0.0;
@@ -48,9 +58,9 @@ inline result measure(F&& f, double budget_s, int min_reps, int max_reps)
     while (true)
     {
         timer.restart();
-        double r = f();
+        auto r = f();
         double dt = timer.elapsed();
-        sink = sink + r;    // outside timing — defeats dead-code elimination
+        keep(r);    // outside timing — defeats dead-code elimination
 
         ts.push_back(dt);
         total += dt;
@@ -61,7 +71,6 @@ inline result measure(F&& f, double budget_s, int min_reps, int max_reps)
         if (reps >= min_reps && total >= budget_s)
             break;
     }
-    (void) sink;
 
     // Median via selection (O(n)), not a full sort. The STL has no median; the
     // tool for "the k-th element" is nth_element. For even n, the lower-middle is

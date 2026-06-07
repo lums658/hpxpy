@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
@@ -79,7 +80,20 @@ double l0(std::string const& op, double const* p, double const* q, std::size_t n
             [](double x, double y) { return x > y ? x : y; });
     if (op == "dot")
         return hpx::transform_reduce(hpx::execution::par, p, p + n, q, 0.0);
-    std::exit(2);
+    // element-wise: new result buffer + one transform pass, return out[0].
+    hpxpy::dvec out(n);
+    double* o = out.data();
+    if (op == "add")
+        hpx::transform(hpx::execution::par, p, p + n, q, o, std::plus<double>{});
+    else if (op == "sub")
+        hpx::transform(hpx::execution::par, p, p + n, q, o, std::minus<double>{});
+    else if (op == "mul")
+        hpx::transform(hpx::execution::par, p, p + n, q, o, std::multiplies<double>{});
+    else if (op == "div")
+        hpx::transform(hpx::execution::par, p, p + n, q, o, std::divides<double>{});
+    else
+        std::exit(2);
+    return n ? o[0] : 0.0;
 }
 
 // L1 — the exact wrapper method.
@@ -93,7 +107,18 @@ double l1(std::string const& op, hpxpy::Array const& a, hpxpy::Array const& b)
         return a.max();
     if (op == "dot")
         return a.dot(b);
-    std::exit(2);
+    hpxpy::Array res;
+    if (op == "add")
+        res = a.add(b);
+    else if (op == "sub")
+        res = a.sub(b);
+    else if (op == "mul")
+        res = a.mul(b);
+    else if (op == "div")
+        res = a.div(b);
+    else
+        std::exit(2);
+    return res.size() ? res.data()[0] : 0.0;
 }
 
 int hpx_main(int, char**)
@@ -103,9 +128,12 @@ int hpx_main(int, char**)
     {
         // Arrays built once; both rungs operate on the SAME buffers. Timed by the
         // shared C++ harness (hpxpy::timing) — identical to how the extension and
-        // the cross-process baseline are timed. dot needs a second operand.
+        // the cross-process baseline are timed. dot/element-wise need a 2nd operand.
+        std::string const& op = g_cfg.op;
+        bool const needs_b = (op == "dot" || op == "add" || op == "sub" ||
+                              op == "mul" || op == "div");
         hpxpy::Array a = hpxpy::arange(n);
-        hpxpy::Array b = (g_cfg.op == "dot") ? hpxpy::arange(n) : hpxpy::Array();
+        hpxpy::Array b = needs_b ? hpxpy::arange(n) : hpxpy::Array();
         double const* p = a.data();
         double const* q = b.data();
 
