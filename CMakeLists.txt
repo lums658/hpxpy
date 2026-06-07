@@ -25,7 +25,12 @@ find_package(HPX REQUIRED)
 message(STATUS "hpxpy: found HPX ${HPX_VERSION} at ${HPX_DIR}")
 
 # --- The extension ----------------------------------------------------------
-nanobind_add_module(_core src/_core.cpp)
+# nanobind size-optimizes extensions with -Os by default. But the HPX reduce/
+# compute templates inline into THIS translation unit, and -Os de-optimizes that
+# numeric kernel (~2x slower than the -O3 C++ baseline, worst single-threaded; the
+# cpp_baseline/diag ladder shows the wrapper itself adds 0 penalty). NOMINSIZE
+# drops the -Os entirely so the Release -O3 stands and the penalty is ~1.0.
+nanobind_add_module(_core NOMINSIZE src/_core.cpp)
 target_link_libraries(_core PRIVATE
   HPX::hpx
   HPX::wrap_main

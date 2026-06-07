@@ -1,8 +1,8 @@
 # Tier-2 perf gate — runs on the self-hosted Rostam runner, on an EXCLUSIVE node.
 # Triggered manually (workflow_dispatch) or by adding the 'run-bench' label to a PR
-# (maintainer action). Drives benchmarks.runner's thread/size sweep; the C++
-# baseline (and thus the abstraction-penalty column) is added via --baseline once
-# the cpp_baseline binary lands.
+# (maintainer action). Builds the C++ baseline, then drives benchmarks.runner's
+# thread/size sweep with --baseline so the abstraction penalty (hpxpy ÷ C++, both
+# timed by the shared C++ harness) is reported. CSV uploaded as an artifact.
 #
 # Security: only same-repo (non-fork) refs run on the runner.
 name: bench
@@ -23,24 +23,32 @@ jobs:
     runs-on: [self-hosted, rostam]
     steps:
       - uses: actions/checkout@v4
-      - name: microbenchmark sweep on an exclusive medusa node
+      - name: build + abstraction-penalty sweep on an exclusive medusa node
         run: |
-          srun --partition=medusa --nodes=1 --exclusive --time=0:20:00 --cpus-per-task=40 \
+          srun --partition=medusa --nodes=1 --exclusive --time=0:25:00 --cpus-per-task=40 \
             bash -c '
               source env.sh
               unset LD_PRELOAD
+              # extension
               "$PY" -m pip install -e ".[test]" --no-cache-dir \
                 -C cmake.define.CMAKE_CXX_COMPILER=/opt/apps/gcc/15.1.0/bin/g++ \
                 -C cmake.define.CMAKE_PREFIX_PATH="$HPX_ROOT" \
                 -C cmake.define.HPX_DIR="$HPX_DIR" >/dev/null
-              LD_PRELOAD="$HPXPY_TCMALLOC" "$PY" -m benchmarks.runner sweep \
-                --op sum --sizes 1e6,1e7,1e8 --threads 1,2,4,8,16,32,40 \
-                --out bench_results.csv
+              # C++ baseline (the abstraction-penalty denominator)
+              cmake -S cpp_baseline -B cpp_baseline/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_CXX_COMPILER=/opt/apps/gcc/15.1.0/bin/g++ \
+                -DCMAKE_PREFIX_PATH="$HPX_ROOT" -DHPX_DIR="$HPX_DIR" >/dev/null
+              cmake --build cpp_baseline/build >/dev/null
+              for op in sum min max; do
+                LD_PRELOAD="$HPXPY_TCMALLOC" "$PY" -m benchmarks.runner sweep \
+                  --op $op --sizes 1e7,1e8 --threads 1,2,4,8,16,32,40 --budget 0.3 \
+                  --baseline ./cpp_baseline/build/bench --out bench_$op.csv
+              done
             '
       - name: upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bench_results
-          path: bench_results.csv
+          path: bench_*.csv
           if-no-files-found: ignore

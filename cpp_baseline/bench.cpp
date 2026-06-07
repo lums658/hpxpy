@@ -15,14 +15,14 @@
 //
 // SPDX-License-Identifier: MIT
 
+#include "timing.hpp"
+
 #include <hpx/algorithm.hpp>
 #include <hpx/execution.hpp>
 #include <hpx/hpx_init.hpp>
 #include <hpx/modules/compute_local.hpp>
 #include <hpx/numeric.hpp>
 
-#include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -39,8 +39,9 @@ struct config
 {
     std::string op = "sum";
     std::vector<std::size_t> sizes;
-    int repeats = 7;
-    int warmup = 1;
+    double budget = 0.5;    // adaptive: time reps until this many seconds elapse
+    int min_reps = 5;
+    int max_reps = 200;
 };
 
 config g_cfg;
@@ -71,17 +72,6 @@ std::vector<std::size_t> parse_sizes(std::string const& spec)
     return out;
 }
 
-double median(std::vector<double>& xs)
-{
-    std::sort(xs.begin(), xs.end());
-    std::size_t n = xs.size();
-    if (n == 0)
-        return 0.0;
-    if (n % 2 != 0)
-        return xs[n / 2];
-    return 0.5 * (xs[n / 2 - 1] + xs[n / 2]);
-}
-
 // NUMA-first-touched vector of n elements set to iota 0..n-1, matching what an
 // hpxpy Array constructor produces. The block_allocator first-touches at
 // construction; the parallel for_loop writes the values on the same workers.
@@ -94,62 +84,45 @@ dvec make_iota(std::size_t n)
     return v;
 }
 
-// Median-of-times for one (op, n). Data is built (and first-touched) ONCE, outside
-// the timed region — only the reduction is timed, matching the Python runner.
-// Writes the computed result to *out_value.
-double time_op(std::string const& op, std::size_t n, int repeats, int warmup,
-    double* out_value)
-{
-    dvec a = make_iota(n);
-    dvec b;
-    if (op == "dot")
-        b = make_iota(n);
-    double const* pa = a.data();
-    double const* pb = (op == "dot") ? b.data() : nullptr;
-
-    auto run = [&]() -> double {
-        if (op == "sum")
-            return hpx::reduce(hpx::execution::par, pa, pa + n, 0.0);
-        if (op == "min")
-            return hpx::reduce(hpx::execution::par, pa, pa + n,
-                std::numeric_limits<double>::infinity(),
-                [](double x, double y) { return x < y ? x : y; });
-        if (op == "max")
-            return hpx::reduce(hpx::execution::par, pa, pa + n,
-                -std::numeric_limits<double>::infinity(),
-                [](double x, double y) { return x > y ? x : y; });
-        if (op == "dot")
-            return hpx::transform_reduce(hpx::execution::par, pa, pa + n, pb, 0.0);
-        std::fprintf(stderr, "unknown op: %s\n", op.c_str());
-        std::exit(2);
-    };
-
-    double value = 0.0;
-    for (int i = 0; i < warmup; ++i)
-        value = run();
-    std::vector<double> ts;
-    ts.reserve(static_cast<std::size_t>(repeats));
-    for (int i = 0; i < repeats; ++i)
-    {
-        auto t0 = std::chrono::steady_clock::now();
-        value = run();
-        auto t1 = std::chrono::steady_clock::now();
-        ts.push_back(std::chrono::duration<double>(t1 - t0).count());
-    }
-    *out_value = value;
-    return median(ts);
-}
-
 int hpx_main(int, char**)
 {
     int const threads = static_cast<int>(hpx::get_num_worker_threads());
     for (std::size_t n : g_cfg.sizes)
     {
-        double value = 0.0;
-        double med = time_op(g_cfg.op, n, g_cfg.repeats, g_cfg.warmup, &value);
-        std::printf("{\"op\": \"%s\", \"n\": %zu, \"threads\": %d, "
-                    "\"impl\": \"cpp\", \"median_s\": %.12g, \"value\": %.12g}\n",
-            g_cfg.op.c_str(), n, threads, med, value);
+        // Data is built (and first-touched) ONCE, outside the timed region — only
+        // the reduction is timed, by the shared C++ harness (hpxpy::timing).
+        dvec a = make_iota(n);
+        dvec b;
+        if (g_cfg.op == "dot")
+            b = make_iota(n);
+        double const* pa = a.data();
+        double const* pb = (g_cfg.op == "dot") ? b.data() : nullptr;
+        std::string const& op = g_cfg.op;
+
+        auto run = [&]() -> double {
+            if (op == "sum")
+                return hpx::reduce(hpx::execution::par, pa, pa + n, 0.0);
+            if (op == "min")
+                return hpx::reduce(hpx::execution::par, pa, pa + n,
+                    std::numeric_limits<double>::infinity(),
+                    [](double x, double y) { return x < y ? x : y; });
+            if (op == "max")
+                return hpx::reduce(hpx::execution::par, pa, pa + n,
+                    -std::numeric_limits<double>::infinity(),
+                    [](double x, double y) { return x > y ? x : y; });
+            if (op == "dot")
+                return hpx::transform_reduce(hpx::execution::par, pa, pa + n, pb, 0.0);
+            std::fprintf(stderr, "unknown op: %s\n", op.c_str());
+            std::exit(2);
+        };
+
+        hpxpy::timing::result r =
+            hpxpy::timing::measure(run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+        double value = run();    // deterministic; for analytic cross-check
+
+        std::printf("{\"op\": \"%s\", \"n\": %zu, \"threads\": %d, \"impl\": \"cpp\", "
+                    "\"median_s\": %.12g, \"reps\": %d, \"value\": %.12g}\n",
+            op.c_str(), n, threads, r.median_s, r.reps, value);
         std::fflush(stdout);
     }
     return hpx::finalize();
@@ -172,10 +145,12 @@ int main(int argc, char** argv)
             g_cfg.sizes = parse_sizes(next());
         else if (a == "--threads")
             threads = std::stoi(next());
-        else if (a == "--repeats")
-            g_cfg.repeats = std::stoi(next());
-        else if (a == "--warmup")
-            g_cfg.warmup = std::stoi(next());
+        else if (a == "--budget")
+            g_cfg.budget = std::stod(next());
+        else if (a == "--min-reps")
+            g_cfg.min_reps = std::stoi(next());
+        else if (a == "--max-reps")
+            g_cfg.max_reps = std::stoi(next());
         // unknown args ignored
     }
     if (g_cfg.sizes.empty())
