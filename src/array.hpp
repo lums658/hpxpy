@@ -19,6 +19,7 @@
 #include <hpx/threading_base/threading_base_fwd.hpp>
 
 #include <cstddef>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -99,6 +100,13 @@ public:
         return hpx::transform_reduce(hpx::execution::par, p, p + size_, q, 0.0);
     }
 
+    // Element-wise binary ops -> a NEW Array (allocating a new top-level array is
+    // allowed; never a between-layers buffer). One fused hpx::transform pass.
+    Array add(Array const& o) const { return binary(o, std::plus<double>{}); }
+    Array sub(Array const& o) const { return binary(o, std::minus<double>{}); }
+    Array mul(Array const& o) const { return binary(o, std::multiplies<double>{}); }
+    Array div(Array const& o) const { return binary(o, std::divides<double>{}); }
+
     // 0, 1, 2, ..., n-1. The block_allocator first-touches at construction; the
     // parallel for_loop writes the ramp on the same HPX workers (stays NUMA-local).
     static Array iota(std::size_t n)
@@ -115,6 +123,24 @@ public:
     }
 
 private:
+    template <typename Op>
+    Array binary(Array const& o, Op op) const
+    {
+        if (size_ != o.size_)
+            throw std::invalid_argument("element-wise op: size mismatch");
+        Array r;
+        r.size_ = size_;
+        std::size_t const n = size_;
+        const double* p = n ? data_->data() : nullptr;
+        const double* q = n ? o.data_->data() : nullptr;
+        on_hpx_thread([&] {
+            r.data_ = std::make_shared<dvec>(n);    // new top-level array
+            double* out = r.data_->data();
+            hpx::transform(hpx::execution::par, p, p + n, q, out, op);
+        });
+        return r;
+    }
+
     std::shared_ptr<dvec> data_;
     std::size_t size_ = 0;
 };

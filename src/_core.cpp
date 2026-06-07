@@ -152,6 +152,32 @@ NB_MODULE(_core, m)
             nb::gil_scoped_release release;
             return a.dot(b);
         }, "b"_a, "Fused dot product (single-pass transform_reduce).")
+        // Element-wise binary ops -> new Array (hpx::transform). Operators and the
+        // NumPy-style named methods share one kernel; GIL released around the work.
+        .def("add", [](Array const& a, Array const& b) {
+            nb::gil_scoped_release r; return a.add(b);
+        }, "b"_a, "Element-wise a + b.")
+        .def("sub", [](Array const& a, Array const& b) {
+            nb::gil_scoped_release r; return a.sub(b);
+        }, "b"_a, "Element-wise a - b.")
+        .def("mul", [](Array const& a, Array const& b) {
+            nb::gil_scoped_release r; return a.mul(b);
+        }, "b"_a, "Element-wise a * b.")
+        .def("div", [](Array const& a, Array const& b) {
+            nb::gil_scoped_release r; return a.div(b);
+        }, "b"_a, "Element-wise a / b.")
+        .def("__add__", [](Array const& a, Array const& b) {
+            nb::gil_scoped_release r; return a.add(b);
+        })
+        .def("__sub__", [](Array const& a, Array const& b) {
+            nb::gil_scoped_release r; return a.sub(b);
+        })
+        .def("__mul__", [](Array const& a, Array const& b) {
+            nb::gil_scoped_release r; return a.mul(b);
+        })
+        .def("__truediv__", [](Array const& a, Array const& b) {
+            nb::gil_scoped_release r; return a.div(b);
+        })
         .def("__len__", &Array::size)
         .def("__repr__", [](Array const& a) {
             return "Array(size=" + std::to_string(a.size()) + ")";
@@ -183,6 +209,24 @@ NB_MODULE(_core, m)
         return std::make_pair(r.median_s, r.reps);
     }, "a"_a, "b"_a, "budget"_a = 0.5, "min_reps"_a = 5, "max_reps"_a = 200,
        "C++-timed median-of-times (s) and rep count for dot(a, b).");
+
+    // Element-wise binary op benchmark (result is a new Array; the timing harness
+    // keeps it observable so the transform is not elided).
+    m.def("bench_binary", [](Array const& a, Array const& b, std::string const& op,
+                             double budget, int min_reps, int max_reps) {
+        nb::gil_scoped_release release;
+        auto run = [&]() -> Array {
+            if (op == "add") return a.add(b);
+            if (op == "sub") return a.sub(b);
+            if (op == "mul") return a.mul(b);
+            if (op == "div") return a.div(b);
+            throw std::invalid_argument("unknown op: " + op);
+        };
+        hpxpy::timing::result r =
+            hpxpy::timing::measure(run, budget, min_reps, max_reps);
+        return std::make_pair(r.median_s, r.reps);
+    }, "a"_a, "b"_a, "op"_a, "budget"_a = 0.5, "min_reps"_a = 5, "max_reps"_a = 200,
+       "C++-timed median-of-times (s) and rep count for an element-wise op.");
 
     m.def("zeros", &hpxpy::zeros, "n"_a, "Create an Array of n zeros (NUMA-aware).");
     m.def("full", &hpxpy::full, "n"_a, "value"_a,

@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
@@ -89,15 +90,19 @@ int hpx_main(int, char**)
     int const threads = static_cast<int>(hpx::get_num_worker_threads());
     for (std::size_t n : g_cfg.sizes)
     {
-        // Data is built (and first-touched) ONCE, outside the timed region — only
-        // the reduction is timed, by the shared C++ harness (hpxpy::timing).
+        std::string const& op = g_cfg.op;
+        bool const needs_b =
+            (op == "dot" || op == "add" || op == "sub" || op == "mul" || op == "div");
+
+        // Operand data is built (and first-touched) ONCE, outside the timed region.
+        // Reductions time only the reduce; element-wise mirrors the wrapper a⊙b by
+        // allocating a fresh result each call (so the alloc cost is in both sides).
         dvec a = make_iota(n);
         dvec b;
-        if (g_cfg.op == "dot")
+        if (needs_b)
             b = make_iota(n);
         double const* pa = a.data();
-        double const* pb = (g_cfg.op == "dot") ? b.data() : nullptr;
-        std::string const& op = g_cfg.op;
+        double const* pb = needs_b ? b.data() : nullptr;
 
         auto run = [&]() -> double {
             if (op == "sum")
@@ -112,8 +117,19 @@ int hpx_main(int, char**)
                     [](double x, double y) { return x > y ? x : y; });
             if (op == "dot")
                 return hpx::transform_reduce(hpx::execution::par, pa, pa + n, pb, 0.0);
-            std::fprintf(stderr, "unknown op: %s\n", op.c_str());
-            std::exit(2);
+            // element-wise: new result buffer + one transform pass (matches a⊙b)
+            dvec out(n);
+            double* o = out.data();
+            if (op == "add")
+                hpx::transform(hpx::execution::par, pa, pa + n, pb, o, std::plus<double>{});
+            else if (op == "sub")
+                hpx::transform(hpx::execution::par, pa, pa + n, pb, o, std::minus<double>{});
+            else if (op == "mul")
+                hpx::transform(hpx::execution::par, pa, pa + n, pb, o, std::multiplies<double>{});
+            else if (op == "div")
+                hpx::transform(hpx::execution::par, pa, pa + n, pb, o, std::divides<double>{});
+            else { std::fprintf(stderr, "unknown op: %s\n", op.c_str()); std::exit(2); }
+            return n ? o[0] : 0.0;
         };
 
         hpxpy::timing::result r =
