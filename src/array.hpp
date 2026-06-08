@@ -1,16 +1,16 @@
 // hpxpy::Array — the core data type, as a binding-agnostic C++/HPX header.
 //
-// A 1-D float64 array backed by an HPX compute::vector with a NUMA-aware host
-// block_allocator (parallel first-touch). A THIN wrapper: HPX owns the storage,
-// operations ARE HPX algorithms run in place over the contiguous buffer — no
-// copies, no reassembly, no between-layers buffers. Nothing here depends on
-// nanobind/Python, so the same code is used by the bindings (_core.cpp) AND by the
-// C++ abstraction-penalty diagnostic (cpp_baseline/diag.cpp).
-//
-// An Array may be a VIEW: it shares its parent's shared_ptr<dvec> (keeping the
-// buffer alive) plus an offset_; the base pointer is data_->data() + offset_. A
-// slice a[i:j] is a contiguous (step-1) view — no copy, numpy semantics. New
-// (owning) arrays have offset_ == 0, so they stay contiguous from index 0.
+// A 1-D float64 array. Backing is uniform: `owner_` (a type-erased shared_ptr that
+// keeps the buffer alive) + `base_` (the start of THIS array's data) + `size_`. Three
+// flavours, all the same machine:
+//   - owning:   owner_ holds an HPX compute::vector (NUMA block_allocator,
+//               parallel first-touch); base_ = its data().
+//   - view:     a[i:j] shares the parent's owner_; base_ = parent.base_ + start
+//               (contiguous, step-1; numpy view semantics).
+//   - borrow:   owner_ keeps an external buffer alive (e.g. a NumPy array via a
+//               GIL-aware keep-alive); base_ points into it (zero-copy from_numpy).
+// Operations ARE HPX algorithms run in place over base_ — no copies, no reassembly,
+// no between-layers buffers. Nothing here depends on nanobind/Python.
 //
 // SPDX-License-Identifier: MIT
 #pragma once
@@ -34,11 +34,10 @@ namespace hpxpy {
 using numa_alloc = hpx::compute::host::block_allocator<double>;
 using dvec = hpx::compute::vector<double, numa_alloc>;
 
-// Run f on an HPX thread, where the allocator's parallel first-touch and the
-// parallel algorithms must execute. If we are already on an HPX thread (e.g. the
-// diagnostic's hpx_main) run it directly — run_as_hpx_thread asserts it is NOT
-// called from an HPX thread. If we are on a foreign thread (e.g. the Python main
-// thread) hop onto the pool. This keeps the wrapper identical in both contexts.
+// Run f on an HPX thread, where the allocator's parallel first-touch must execute. If
+// already on an HPX thread (e.g. the diagnostic's hpx_main) run it directly —
+// run_as_hpx_thread asserts it is NOT called from an HPX thread. From a foreign thread
+// (e.g. the Python main thread) hop onto the pool. Identical in both contexts.
 template <typename F>
 inline void on_hpx_thread(F&& f)
 {
@@ -52,32 +51,41 @@ class Array
 {
 public:
     Array() = default;
-    Array(std::size_t n, double fill) : size_(n)
-    {
-        on_hpx_thread([&] { data_ = std::make_shared<dvec>(n, fill); });
-    }
+    Array(std::size_t n, double fill) { alloc_(n, fill); }
 
     std::size_t size() const { return size_; }
     std::size_t ndim() const { return 1; }
 
-    // Base of this (possibly offset) view; nullptr if empty. The public const form
-    // is also used by the diagnostic to run the direct (L0) reduce over the exact
-    // same memory the wrapper (L1) reduces.
-    const double* data() const { return data_ ? data_->data() + offset_ : nullptr; }
+    // Start of this array's data (nullptr if empty). The const form is also used by
+    // the diagnostic and by to_numpy (zero-copy export).
+    const double* data() const { return base_; }
+    double* mutable_data() { return base_; }
 
-    // Mutable base — for kernels in sibling wrappers (e.g. CsrMatrix::spmv) that
-    // write into a freshly-allocated result Array. Same pointer as data().
-    double* mutable_data() { return data_ ? data_->data() + offset_ : nullptr; }
-
-    // Element access / scalar write — direct host-memory access (no parallel work,
-    // no allocation). Indices are assumed already normalized by the binding layer.
-    double getitem(std::size_t i) const { return (data_->data() + offset_)[i]; }
-    void setitem(std::size_t i, double v) { (data_->data() + offset_)[i] = v; }
+    // Element access / scalar write — direct host-memory access (no parallel work).
+    // Indices are assumed already normalized by the binding layer.
+    double getitem(std::size_t i) const { return base_[i]; }
+    void setitem(std::size_t i, double v) { base_[i] = v; }
 
     // Contiguous view [start, start+n) sharing this array's buffer (numpy a[i:j]).
     Array view(std::size_t start, std::size_t n) const
     {
-        return Array(data_, offset_ + start, n);
+        Array r;
+        r.owner_ = owner_;    // share the keep-alive (owned or borrowed parent)
+        r.base_ = base_ ? base_ + start : nullptr;
+        r.size_ = n;
+        return r;
+    }
+
+    // Wrap an external buffer (non-owning); `keepalive` keeps it alive. Used by the
+    // zero-copy from_numpy borrow; the keep-alive is type-erased so this header stays
+    // nanobind-free (the binding supplies a GIL-aware deleter).
+    static Array borrow(double* p, std::size_t n, std::shared_ptr<void> keepalive)
+    {
+        Array r;
+        r.owner_ = std::move(keepalive);
+        r.base_ = p;
+        r.size_ = n;
+        return r;
     }
 
     // Reductions — thin wrappers over HPX algorithms, run in place on the buffer.
@@ -85,15 +93,13 @@ public:
     {
         if (size_ == 0)
             return 0.0;
-        const double* p = cbase();
-        return hpx::reduce(hpx::execution::par, p, p + size_, 0.0);
+        return hpx::reduce(hpx::execution::par, base_, base_ + size_, 0.0);
     }
     double min() const
     {
         if (size_ == 0)
             throw std::invalid_argument("min() of an empty Array");
-        const double* p = cbase();
-        return hpx::reduce(hpx::execution::par, p, p + size_,
+        return hpx::reduce(hpx::execution::par, base_, base_ + size_,
             std::numeric_limits<double>::infinity(),
             [](double x, double y) { return x < y ? x : y; });
     }
@@ -101,8 +107,7 @@ public:
     {
         if (size_ == 0)
             throw std::invalid_argument("max() of an empty Array");
-        const double* p = cbase();
-        return hpx::reduce(hpx::execution::par, p, p + size_,
+        return hpx::reduce(hpx::execution::par, base_, base_ + size_,
             -std::numeric_limits<double>::infinity(),
             [](double x, double y) { return x > y ? x : y; });
     }
@@ -113,19 +118,17 @@ public:
             throw std::invalid_argument("dot(): size mismatch");
         if (size_ == 0)
             return 0.0;
-        const double* p = cbase();
-        const double* q = other.cbase();
-        return hpx::transform_reduce(hpx::execution::par, p, p + size_, q, 0.0);
+        return hpx::transform_reduce(
+            hpx::execution::par, base_, base_ + size_, other.base_, 0.0);
     }
 
-    // Element-wise binary ops -> a NEW (owning, offset-0) Array. One hpx::transform.
+    // Element-wise binary ops -> a NEW (owning) Array. One hpx::transform pass.
     Array add(Array const& o) const { return binary(o, std::plus<double>{}); }
     Array sub(Array const& o) const { return binary(o, std::minus<double>{}); }
     Array mul(Array const& o) const { return binary(o, std::multiplies<double>{}); }
     Array div(Array const& o) const { return binary(o, std::divides<double>{}); }
 
-    // Scalar broadcast -> new Array (one unary hpx::transform pass). The r* forms
-    // are the reflected ops (scalar on the left: s - a, s / a).
+    // Scalar broadcast -> new Array. The r* forms are reflected (s - a, s / a).
     Array add_scalar(double s) const { return unary([s](double x) { return x + s; }); }
     Array sub_scalar(double s) const { return unary([s](double x) { return x - s; }); }
     Array rsub_scalar(double s) const { return unary([s](double x) { return s - x; }); }
@@ -133,16 +136,13 @@ public:
     Array div_scalar(double s) const { return unary([s](double x) { return x / s; }); }
     Array rdiv_scalar(double s) const { return unary([s](double x) { return s / x; }); }
 
-    // Deep copy -> a new independent (owning, offset-0) Array (numpy a.copy()).
+    // Deep copy -> a new independent (owning) Array (numpy a.copy()).
     Array copy() const
     {
         Array r;
-        r.size_ = size_;
-        std::size_t const n = size_;
-        const double* p = cbase();
-        on_hpx_thread([&] { r.data_ = std::make_shared<dvec>(n); });
-        double* out = n ? r.data_->data() : nullptr;
-        hpx::copy(hpx::execution::par, p, p + n, out);
+        r.alloc_(size_);
+        if (size_)
+            hpx::copy(hpx::execution::par, base_, base_ + size_, r.base_);
         return r;
     }
 
@@ -151,71 +151,60 @@ public:
     {
         if (size_ < 2)
             return;
-        double* p = base();
-        hpx::sort(hpx::execution::par, p, p + size_);
+        hpx::sort(hpx::execution::par, base_, base_ + size_);
     }
     bool is_sorted() const
     {
         if (size_ < 2)
             return true;
-        const double* p = cbase();
-        return hpx::is_sorted(hpx::execution::par, p, p + size_);
+        return hpx::is_sorted(hpx::execution::par, base_, base_ + size_);
     }
 
-    // Inclusive prefix sum -> a NEW (owning, offset-0) Array (numpy a.cumsum()).
+    // Inclusive prefix sum -> a NEW (owning) Array (numpy a.cumsum()).
     Array cumsum() const
     {
         Array r;
-        r.size_ = size_;
-        std::size_t const n = size_;
-        const double* p = cbase();
-        on_hpx_thread([&] { r.data_ = std::make_shared<dvec>(n); });
-        double* out = n ? r.data_->data() : nullptr;
-        hpx::inclusive_scan(hpx::execution::par, p, p + n, out);
+        r.alloc_(size_);
+        if (size_)
+            hpx::inclusive_scan(hpx::execution::par, base_, base_ + size_, r.base_);
         return r;
     }
 
-    // 0, 1, 2, ..., n-1. The block_allocator first-touches at construction; the
-    // parallel for_loop writes the ramp on the same HPX workers (stays NUMA-local).
+    // 0, 1, 2, ..., n-1. block_allocator first-touches at allocation; the parallel
+    // for_loop (run directly) writes the ramp on the same HPX workers (NUMA-local).
     static Array iota(std::size_t n)
     {
         Array a;
-        a.size_ = n;
-        on_hpx_thread([&] {
-            a.data_ = std::make_shared<dvec>(n);
-            double* p = a.data_->data();
+        a.alloc_(n);
+        double* p = a.base_;
+        if (n)
             hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
                 [p](std::size_t i) { p[i] = static_cast<double>(i); });
-        });
         return a;
     }
 
 private:
-    // View constructor: share an existing buffer at an offset (no allocation).
-    Array(std::shared_ptr<dvec> d, std::size_t off, std::size_t n)
-      : data_(std::move(d)), offset_(off), size_(n)
+    // Allocate an owning NUMA buffer of n elements (value-initialized to fill) on an
+    // HPX thread, and point base_/owner_ at it. Only the allocation is wrapped in
+    // on_hpx_thread; kernels run DIRECTLY at the top level of each method so the op
+    // inlines into the algorithm's inner loop (the op-inlining lesson).
+    void alloc_(std::size_t n, double fill = 0.0)
     {
+        size_ = n;
+        on_hpx_thread([&] {
+            auto d = std::make_shared<dvec>(n, fill);
+            base_ = n ? d->data() : nullptr;
+            owner_ = std::move(d);
+        });
     }
 
-    // Base of this view (data + offset); nullptr if empty.
-    const double* cbase() const { return data_ ? data_->data() + offset_ : nullptr; }
-    double* base() { return data_ ? data_->data() + offset_ : nullptr; }
-
-    // Only the allocation (block_allocator first-touch) is wrapped in on_hpx_thread;
-    // the transform runs DIRECTLY — wrapping it in the lambda prevents the optimizer
-    // from inlining `op` into the inner loop, ~2x on compute-light ops at low thread
-    // counts (caught by the diag ladder). Reductions call their algorithm directly
-    // for the same reason. The result is a fresh owning array (offset 0).
     template <typename Op>
     Array unary(Op op) const
     {
         Array r;
-        r.size_ = size_;
-        std::size_t const n = size_;
-        const double* p = cbase();
-        on_hpx_thread([&] { r.data_ = std::make_shared<dvec>(n); });
-        double* out = n ? r.data_->data() : nullptr;
-        hpx::transform(hpx::execution::par, p, p + n, out, op);
+        r.alloc_(size_);
+        if (size_)
+            hpx::transform(hpx::execution::par, base_, base_ + size_, r.base_, op);
         return r;
     }
 
@@ -225,18 +214,15 @@ private:
         if (size_ != o.size_)
             throw std::invalid_argument("element-wise op: size mismatch");
         Array r;
-        r.size_ = size_;
-        std::size_t const n = size_;
-        const double* p = cbase();
-        const double* q = o.cbase();
-        on_hpx_thread([&] { r.data_ = std::make_shared<dvec>(n); });
-        double* out = n ? r.data_->data() : nullptr;
-        hpx::transform(hpx::execution::par, p, p + n, q, out, op);
+        r.alloc_(size_);
+        if (size_)
+            hpx::transform(
+                hpx::execution::par, base_, base_ + size_, o.base_, r.base_, op);
         return r;
     }
 
-    std::shared_ptr<dvec> data_;
-    std::size_t offset_ = 0;
+    std::shared_ptr<void> owner_;    // keeps the backing alive (dvec, or numpy ref)
+    double* base_ = nullptr;         // start of this array's data (offset folded in)
     std::size_t size_ = 0;
 };
 

@@ -117,6 +117,22 @@ def spmm(a: CsrMatrix, b: DenseMatrix) -> DenseMatrix:
     return a.spmm(b)
 
 
+def from_numpy(a, copy: bool = True) -> Array:
+    """Bring a 1-D float64 C-contiguous NumPy array into an :class:`Array`.
+
+    ``copy=True`` (default) copies into a NUMA-aware buffer (correct first-touch, so
+    HPX ops keep their performance). ``copy=False`` borrows the NumPy buffer
+    zero-copy — hpxpy and NumPy then share memory both ways, but it is numa-naive,
+    so prefer the default for compute. Non-float64/non-contiguous input raises.
+    """
+    return _core.from_numpy(a, copy)
+
+
+def to_numpy(a: Array):
+    """Zero-copy NumPy view of an :class:`Array` (writable; shares memory)."""
+    return _core.to_numpy(a)
+
+
 def zeros(n: int) -> Array:
     """Create an :class:`Array` of ``n`` zeros (NUMA-aware HPX allocation)."""
     return _core.zeros(int(n))
@@ -163,6 +179,8 @@ __all__ = [
     "dense_zeros",
     "dense_from",
     "spmm",
+    "from_numpy",
+    "to_numpy",
     "num_worker_threads",
     "hpx_version",
     "__version__",

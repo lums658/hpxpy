@@ -20,6 +20,7 @@
 #include "timing.hpp"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -124,6 +125,19 @@ void finalize_runtime()
 // sites below), not inside the wrapper.
 // ---------------------------------------------------------------------------
 using hpxpy::Array;
+
+// NumPy bridge types: a 1-D float64 C-contiguous input (writable, so a borrow can
+// share mutations both ways), and a 1-D float64 output view.
+using np_rw = nb::ndarray<nb::numpy, double, nb::c_contig, nb::ndim<1>>;
+using np_out = nb::ndarray<nb::numpy, double, nb::ndim<1>>;
+
+// Zero-copy NumPy view of an Array. `obj` (the Array Python object) is the ndarray's
+// owner, so the HPX buffer outlives the view. Writable; works for slice views too.
+np_out to_numpy_view(nb::object obj)
+{
+    Array& a = nb::cast<Array&>(obj);
+    return np_out(a.mutable_data(), {a.size()}, obj);
+}
 
 }  // namespace
 
@@ -253,6 +267,11 @@ NB_MODULE(_core, m)
                 throw nb::index_error("Array index out of range");
             a.setitem((std::size_t) i, v);
         }, "a[i] = value (write a single element).")
+        .def("to_numpy", &to_numpy_view,
+             "Zero-copy NumPy view (writable; shares memory with the Array).")
+        .def("__array__", [](nb::object self, nb::args, nb::kwargs) {
+            return to_numpy_view(self);    // np.asarray(a) views; np.array(a) copies
+        })
         .def("__len__", &Array::size)
         .def("__repr__", [](Array const& a) {
             return "Array(size=" + std::to_string(a.size()) + ")";
@@ -308,6 +327,34 @@ NB_MODULE(_core, m)
           "Create an Array of n elements set to value (NUMA-aware).");
     m.def("arange", &hpxpy::arange, "n"_a,
           "Create an Array [0, 1, ..., n-1] (NUMA-aware parallel first-touch).");
+
+    // --- NumPy bridge (Phase 2) -------------------------------------------
+    m.def("to_numpy", &to_numpy_view, "a"_a,
+          "Zero-copy NumPy view of an Array (writable; shares memory).");
+    m.def("from_numpy", [](np_rw arr, bool copy) -> Array {
+        std::size_t const n = arr.shape(0);
+        double* p = arr.data();
+        if (copy) {
+            Array a(n, 0.0);    // NUMA-aware; correct first-touch for HPX ops
+            if (n) {
+                nb::gil_scoped_release release;
+                hpx::copy(hpx::execution::par, p, p + n, a.mutable_data());
+            }
+            return a;
+        }
+        // Zero-copy borrow: keep the NumPy buffer alive via a GIL-aware deleter.
+        // numa-naive (numpy placement); use copy=True for HPX compute.
+        auto* hold = new np_rw(arr);
+        std::shared_ptr<void> keep(hold, [](void* q) {
+            nb::gil_scoped_acquire g;
+            delete static_cast<np_rw*>(q);
+        });
+        return Array::borrow(p, n, std::move(keep));
+    }, nb::arg("a").noconvert(), "copy"_a = true,
+       "Bring a 1-D float64 C-contiguous NumPy array into hpxpy. copy=True (default) "
+       "copies into a NUMA-aware Array; copy=False borrows it (zero-copy, shares "
+       "memory both ways, but numa-naive). Non-float64/non-contiguous input raises "
+       "(never a silent copy/cast).");
 
     // --- Sparse (CSR) matrix + SpMV (M5a) ---------------------------------
     nb::class_<hpxpy::CsrMatrix>(m, "CsrMatrix")
