@@ -48,3 +48,9 @@ Sparse (CSR)
 .. autofunction:: hpxpy.dense_zeros
 .. autofunction:: hpxpy.dense_from
 .. autofunction:: hpxpy.spmm
+
+NumPy bridge
+------------
+
+.. autofunction:: hpxpy.from_numpy
+.. autofunction:: hpxpy.to_numpy

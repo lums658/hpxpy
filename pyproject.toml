@@ -19,9 +19,10 @@ authors = [{ name = "Andrew Lumsdaine" }]
 dependencies = []
 
 [project.optional-dependencies]
-test = ["pytest>=7", "pytest-cov>=4"]
+# numpy is a TEST-only oracle for the bridge (round-trip / parity), not a runtime dep.
+test = ["pytest>=7", "pytest-cov>=4", "numpy>=1.23"]
 docs = ["sphinx>=7", "furo"]
-dev = ["pytest>=7", "pytest-cov>=4", "ruff", "nox", "sphinx>=7", "furo"]
+dev = ["pytest>=7", "pytest-cov>=4", "numpy>=1.23", "ruff", "nox", "sphinx>=7", "furo"]
 
 [tool.scikit-build]
 minimum-version = "0.9"
