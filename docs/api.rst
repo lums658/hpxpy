@@ -30,3 +30,14 @@ Reductions & element-wise
 .. autofunction:: hpxpy.min
 .. autofunction:: hpxpy.max
 .. autofunction:: hpxpy.dot
+
+Sparse (CSR)
+------------
+
+.. autoclass:: hpxpy.CsrMatrix
+   :members:
+   :special-members: __matmul__
+
+.. autofunction:: hpxpy.csr_from
+.. autofunction:: hpxpy.laplacian_1d
+.. autofunction:: hpxpy.spmv

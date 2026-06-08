@@ -15,6 +15,7 @@
 //
 // SPDX-License-Identifier: MIT
 
+#include "sparse.hpp"
 #include "timing.hpp"
 
 #include <hpx/algorithm.hpp>
@@ -24,6 +25,7 @@
 #include <hpx/numeric.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -90,6 +92,36 @@ int hpx_main(int, char**)
     int const threads = static_cast<int>(hpx::get_num_worker_threads());
     for (std::size_t n : g_cfg.sizes)
     {
+        if (g_cfg.op == "spmv")    // direct C++ HPX CSR SpMV baseline (perf ceiling)
+        {
+            hpxpy::CsrMatrix A = hpxpy::laplacian_1d(n);
+            hpxpy::Array x = hpxpy::arange(n);
+            const std::int64_t* rp = A.row_ptr_data();
+            const std::int64_t* ci = A.col_idx_data();
+            const double* vp = A.values_data();
+            const double* xp = x.data();
+            hpxpy::Array y(n, 0.0);    // pre-allocated, reused — time the KERNEL only
+            double* yp = y.mutable_data();
+            auto run = [&]() -> double {
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
+                    [rp, ci, vp, xp, yp](std::size_t i) {
+                        double acc = 0.0;
+                        for (std::int64_t k = rp[i]; k < rp[i + 1]; ++k)
+                            acc += vp[k] * xp[ci[k]];
+                        yp[i] = acc;
+                    });
+                return n ? yp[0] : 0.0;
+            };
+            hpxpy::timing::result r =
+                hpxpy::timing::measure(run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+            double value = run();
+            std::printf("{\"op\": \"spmv\", \"n\": %zu, \"threads\": %d, \"impl\": \"cpp\", "
+                        "\"median_s\": %.12g, \"reps\": %d, \"value\": %.12g}\n",
+                n, threads, r.median_s, r.reps, value);
+            std::fflush(stdout);
+            continue;
+        }
+
         std::string const& op = g_cfg.op;
         bool const needs_b =
             (op == "dot" || op == "add" || op == "sub" || op == "mul" || op == "div");
@@ -180,6 +212,8 @@ int main(int argc, char** argv)
     hargs.emplace_back(argv[0]);
     if (threads > 0)
         hargs.emplace_back("--hpx:threads=" + std::to_string(threads));
+    // Avoid mmap thread-stack exhaustion (max_map_count) at high thread counts.
+    hargs.emplace_back("--hpx:ini=hpx.stacks.use_guard_pages=0");
     std::vector<char*> hargv;
     for (auto& s : hargs)
         hargv.push_back(s.data());
