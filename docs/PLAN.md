@@ -1,8 +1,8 @@
 # HPXPy (rewrite) — Plan & Process
 
-**Status:** DRAFT for review. `DECIDE:` = open choice. Working planning home:
-`~/LSU/hpxpy-ng/` (the actual repo name/location is DECIDE #1 below).
-Created 2026-06-04.
+**Status:** ACTIVE. Phase 1 (thin HPX wrapper) complete through the slice/view model —
+see §8. Repo: `github.com/lums658/hpxpy`. Resolved choices are marked inline; the only
+still-open item is DECIDE #4 (dtype scope). Created 2026-06-04; last validated 2026-06-08.
 
 A from-scratch reimplementation of HPXPy: a NumPy-compatible Python array library
 backed by the HPX C++ runtime, built incrementally with correctness + benchmark gates
@@ -74,17 +74,15 @@ core is designed to make each one impossible-by-construction:
   the HPX runtime + thread count; default `par_unseq`.
 - **NumPy interop (Phase 2):** zero-copy borrow of the contiguous compute::vector buffer;
   the distributed layer stays in HPX (explicit gather only if ever truly needed).
-- **Binding layer:** `DECIDE #2:` pybind11 (matches old code, what we know) vs nanobind
-  (what HPyX uses; lighter, Py3.13 free-threading; eases eventual merge). Leaning
-  **nanobind** to align with HPyX for the merge — but pybind11 is lower-risk/known.
+- **Binding layer:** `DECIDE #2 — RESOLVED: nanobind` (lighter, zero-copy ndarray,
+  Py3.13 free-threading, aligns with HPyX for the eventual merge).
 
 ---
 
 ## 4. Repository & packaging
 
 - **Standalone repo** depending on a pinned, installed HPX (`find_package(HPX)`).
-  `DECIDE #1:` repo name/location — proposed `hpxpy` (new GitHub repo under the group)
-  or a fresh branch; planning lives in `~/LSU/hpxpy-ng/` until decided.
+  `DECIDE #1 — RESOLVED: standalone repo github.com/lums658/hpxpy` (public, MIT).
 - **Layout:**
   ```
   hpxpy/                # python package
@@ -98,8 +96,9 @@ core is designed to make each one impossible-by-construction:
 - **Build:** scikit-build-core + CMake against installed HPX (Boost 1.90 / gcc 15 /
   Py3.13 on Rostam — captured by an `env.sh` like the current `rostam_env.sh`,
   incl. tcmalloc preload).
-- **CI:** `DECIDE #3:` container image with pinned HPX, or self-hosted Rostam runner.
-  CI runs build → unit tests → microbenchmarks (perf-regression check) on each PR.
+- **CI:** `DECIDE #3 — RESOLVED: self-hosted Rostam runner` (HPX must be present to
+  build/test). Hosted lint (Tier-1) + Rostam build-test gate each PR; bench.yml runs the
+  perf/penalty sweep on an exclusive node; docs.yml builds + deploys the site on main.
 
 ---
 
@@ -248,21 +247,21 @@ defines the local==CI gate so "works locally" == "passes CI".
 ### Phase 1 — Wrap HPX; validate zero abstraction penalty (NO NumPy in the data path)
 - **M0 — Substrate.** (done) Repo + build (installed HPX) + CI + `env.sh` + harness + C++
   baseline. Exit: package builds & imports; CI green.
-- **M1 — Array core.** `Array` = `hpx::compute::vector<double, block_allocator>` wrapper
-  + introspection (`size`/`ndim`) + HPX-native construction (`zeros`/fill; later iota),
-  NUMA-aware alloc via the block_allocator. **No NumPy.** Exit: builds, constructs,
-  NUMA-first-touched.
-- **M2 — Reductions.** `reduce`/`sum`/`dot`/`min`/`max` as wrapped HPX algorithms. First
-  **zero-penalty validation** vs C++; correctness via analytic values. Exit: penalty ≈ 0,
-  scaling, correct.
-- **M3 — Transforms / element-wise** (+ `sort`/`scan`). In-place HPX algorithms; results
-  stay in HPX. Exit: penalty ≈ 0, scaling.
-- **M4 — Distributed.** multi-locality arrays + collectives; strong/weak scaling. Exit:
-  multi-node penalty/scaling.
-- **M5 — Stencil / SpMV** (NWGraph-relevant). Exit: scaling vs C++ baseline.
+- **M1 — Array core.** (done) `Array` = `hpx::compute::vector<double, block_allocator>`
+  wrapper + introspection (`size`/`ndim`) + HPX-native construction
+  (`zeros`/`full`/`arange`), NUMA-aware first-touch. **No NumPy.**
+- **M2 — Reductions.** (done) `sum`/`min`/`max`/`dot` as wrapped HPX algorithms; first
+  zero-penalty validation vs C++ (≈1.0), correctness via analytic values.
+- **M3 — Transforms / element-wise.** (done) element-wise `add/sub/mul/div` + operators,
+  scalar broadcast, `sort`/`copy`/`cumsum`/`is_sorted` — all penalty ≈1.0.
+- **Slice/view model.** (done) `a[i]`, `a[i:j]` contiguous memory-sharing views,
+  `a[i]=x` (offset in Array; numpy view semantics; `step!=1` deferred → bead `x7i`).
+- **M4 — Distributed.** (not yet filed) multi-locality arrays + collectives; strong/weak
+  scaling. Exit: multi-node penalty/scaling.
+- **M5 — Stencil / SpMV** (not yet filed; NWGraph-relevant). Exit: scaling vs C++ baseline.
 
-**Phase-1 done** = a representative set of HPX ops wrapped with measured ~0 abstraction
-penalty vs C++ HPX. Only then →
+**Phase-1 status:** the representative single-locality op set is wrapped with measured
+~0 abstraction penalty vs C++ HPX (M1–M3 + slices done). M4/M5 extend it; then →
 
 ### Phase 2 — NumPy compatibility (separate; starts after Phase 1)
 - **Zero-copy bridge:** `from_numpy` (borrow) + `to_numpy` (zero-copy view; distributed

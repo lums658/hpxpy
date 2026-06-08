@@ -14,7 +14,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "Andrew Lumsdaine" }]
-dependencies = ["numpy>=1.23"]
+# No runtime deps in Phase 1 (the data path is pure HPX). NumPy returns as a real
+# dependency with the Phase-2 zero-copy bridge.
+dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest>=7", "pytest-cov>=4"]
