@@ -1,29 +1,34 @@
 # HPXPy
 
-A NumPy-compatible Python array library backed by the [HPX](https://hpx.stellar-group.org/)
-C++ runtime — array operations execute as real HPX parallel computations (shared-memory
-now, distributed later).
+A thin Python array library backed by the [HPX](https://hpx.stellar-group.org/) C++
+runtime — array operations *are* real HPX parallel algorithms, with a measured
+**abstraction penalty of ~1.0** vs hand-written C++ HPX.
 
-> **Status: M0 (substrate).** The full toolchain is up — scikit-build-core → CMake →
-> nanobind, linked against installed HPX, with a managed HPX runtime and a zero-copy
-> `nb::ndarray` → HPX parallel path proven by tests. Real array types and operations
-> arrive in the next milestones. See [docs/PLAN.md](docs/PLAN.md) for architecture +
-> process.
+📖 **Docs:** https://lums658.github.io/hpxpy/
+
+> **Status: Phase 1 (thin HPX wrapper).** Done and merged, each at ~zero abstraction
+> penalty (1→40 threads, vs a C++ HPX baseline): the NUMA-aware `Array`
+> (`zeros`/`full`/`arange`), reductions (`sum`/`min`/`max`/`dot`), element-wise +
+> scalar ops (`a*b`, `a + 2.0`, …), `sort`/`copy`/`cumsum`, and contiguous slice
+> **views** (`a[i]`, `a[i:j]`). NumPy compatibility is a separate, later phase.
+> See [docs/PLAN.md](docs/PLAN.md) for architecture + process.
 
 ## Goals
 
-- **NumPy-replaceable** Python API (`arange`, `array`, `a*b`, `a@b`, `dot`, reductions…).
-- **Backed by HPX**: one array type over `hpx::partitioned_vector`, NUMA-aware
-  allocation, fused/lazy expression evaluation — no hidden serial fallbacks.
-- **Measured**: every operation is benchmarked against hand-written C++ HPX and NumPy
-  (throughput, scalability, abstraction penalty) and checked for NumPy idiom parity.
+- **Thin HPX wrapper, ~zero abstraction penalty**: each op is a single HPX algorithm
+  over the array's buffer — no copies, no between-layers buffers. `hpxpy ÷ C++-HPX ≈ 1.0`,
+  measured every iteration against a hand-written baseline.
+- **Backed by HPX**: one array type over a NUMA-aware `hpx::compute::vector`
+  (`block_allocator`, parallel first-touch) — no hidden serial fallbacks.
+- **NumPy semantics** for what exists (`a.sort()` in place, `np.sort(a)` copy, views) ;
+  a full NumPy-compatible bridge is Phase 2.
 
 ## Requirements
 
 - A built/installed **HPX** (pinned), found via `find_package(HPX)`.
 - **Python ≥ 3.13**, CMake ≥ 3.18, a C++20 compiler, **nanobind** (build dep).
 
-## Building (M0, on Rostam)
+## Building (on Rostam)
 
 ```bash
 source env.sh            # toolchain: gcc 15 / Boost 1.90 / Py 3.13 / HPX paths
@@ -39,21 +44,22 @@ LD_PRELOAD=$HPXPY_TCMALLOC pytest          # HPX uses tcmalloc; preload at runti
 
 Quick check:
 ```python
-import hpxpy as hpx, numpy as np
-hpx.init()
-print(hpx.num_worker_threads(), hpx.sum(np.arange(1e6)))   # parallel, zero-copy
+import hpxpy as hpx
+hpx.init()                          # start the HPX runtime (all cores)
+a = hpx.arange(1_000_000)           # NUMA-aware Array [0, 1, ..., n-1]
+print(hpx.num_worker_threads(), a.sum(), a[2:5].sum())   # parallel reductions
 hpx.finalize()
 ```
 
 ## Repository layout
 
 ```
-src/          C++ nanobind bindings (_core)
+src/          C++ wrapper (array.hpp, timing.hpp) + nanobind bindings (_core)
 hpxpy/        Python package
-tests/        pytest: correctness + NumPy-parity
-benchmarks/   microbenchmarks (throughput / scalability / abstraction penalty)
-cpp_baseline/ hand-written C++ HPX reference kernels (perf ceiling)
-docs/PLAN.md  architecture + development process
+tests/        pytest: correctness (analytic) + lifecycle
+benchmarks/   runner + results (throughput / scaling / abstraction penalty)
+cpp_baseline/ hand-written C++ HPX baseline + the in-binary penalty ladder (diag)
+docs/         Sphinx site (PLAN.md = architecture + process)
 ```
 
 ## License
