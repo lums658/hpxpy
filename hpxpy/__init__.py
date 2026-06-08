@@ -14,6 +14,9 @@ from . import _core
 #: The core 1-D float64 array type, backed by a NUMA-aware HPX compute::vector.
 Array = _core.Array
 
+#: A CSR (compressed sparse row) float64 matrix (see :func:`csr_from`, :func:`laplacian_1d`).
+CsrMatrix = _core.CsrMatrix
+
 __version__ = "0.0.1"
 
 _initialized = False
@@ -81,6 +84,21 @@ def cumsum(a: Array) -> Array:
     return a.cumsum()
 
 
+def csr_from(rows: int, cols: int, row_ptr, col_idx, values) -> CsrMatrix:
+    """Build a :class:`CsrMatrix` from explicit CSR arrays (row_ptr/col_idx/values)."""
+    return _core.csr_from(int(rows), int(cols), row_ptr, col_idx, values)
+
+
+def laplacian_1d(n: int) -> CsrMatrix:
+    """1-D Laplacian CSR matrix — tridiagonal ``[-1, 2, -1]``, ``n``×``n``."""
+    return _core.laplacian_1d(int(n))
+
+
+def spmv(a: CsrMatrix, x: Array) -> Array:
+    """Sparse matrix-vector product ``A @ x`` (parallel; ``a.spmv(x)``)."""
+    return a.spmv(x)
+
+
 def zeros(n: int) -> Array:
     """Create an :class:`Array` of ``n`` zeros (NUMA-aware HPX allocation)."""
     return _core.zeros(int(n))
@@ -119,6 +137,10 @@ __all__ = [
     "dot",
     "sort",
     "cumsum",
+    "CsrMatrix",
+    "csr_from",
+    "laplacian_1d",
+    "spmv",
     "num_worker_threads",
     "hpx_version",
     "__version__",

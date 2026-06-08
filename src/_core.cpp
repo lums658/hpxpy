@@ -16,13 +16,16 @@
 #include <hpx/version.hpp>
 
 #include "array.hpp"
+#include "sparse.hpp"
 #include "timing.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -50,6 +53,8 @@ struct runtime_manager
         argv_storage_.emplace_back("hpxpy");
         if (num_threads > 0)
             argv_storage_.emplace_back("--hpx:threads=" + std::to_string(num_threads));
+        // Avoid mmap thread-stack exhaustion (max_map_count) at high thread counts.
+        argv_storage_.emplace_back("--hpx:ini=hpx.stacks.use_guard_pages=0");
         for (auto& s : argv_storage_) argv_.push_back(s.data());
 
         hpx::init_params params;
@@ -303,4 +308,40 @@ NB_MODULE(_core, m)
           "Create an Array of n elements set to value (NUMA-aware).");
     m.def("arange", &hpxpy::arange, "n"_a,
           "Create an Array [0, 1, ..., n-1] (NUMA-aware parallel first-touch).");
+
+    // --- Sparse (CSR) matrix + SpMV (M5a) ---------------------------------
+    nb::class_<hpxpy::CsrMatrix>(m, "CsrMatrix")
+        .def_prop_ro("rows", &hpxpy::CsrMatrix::rows)
+        .def_prop_ro("cols", &hpxpy::CsrMatrix::cols)
+        .def_prop_ro("nnz", &hpxpy::CsrMatrix::nnz)
+        .def("spmv", [](hpxpy::CsrMatrix const& a, Array const& x) {
+            nb::gil_scoped_release r; return a.spmv(x);
+        }, "x"_a, "Sparse matrix-vector product y = A @ x (row-parallel).")
+        .def("__matmul__", [](hpxpy::CsrMatrix const& a, Array const& x) {
+            nb::gil_scoped_release r; return a.spmv(x);
+        })
+        .def("__repr__", [](hpxpy::CsrMatrix const& a) {
+            return "CsrMatrix(rows=" + std::to_string(a.rows()) + ", cols=" +
+                   std::to_string(a.cols()) + ", nnz=" + std::to_string(a.nnz()) + ")";
+        });
+
+    m.def("csr_from", &hpxpy::CsrMatrix::from_csr, "rows"_a, "cols"_a,
+          "row_ptr"_a, "col_idx"_a, "values"_a,
+          "Build a CsrMatrix from explicit CSR arrays (row_ptr, col_idx, values).");
+    m.def("laplacian_1d", &hpxpy::laplacian_1d, "n"_a,
+          "1-D Laplacian CSR matrix (tridiagonal [-1, 2, -1], n x n).");
+
+    m.def("bench_spmv", [](hpxpy::CsrMatrix const& a, Array const& x, double budget,
+                           int min_reps, int max_reps) {
+        nb::gil_scoped_release release;
+        // Time the KERNEL (y pre-allocated, reused) so the penalty reflects the
+        // wrapper, not the result allocation's per-process first-touch variance
+        // (which dominates this memory-bound op at small sizes).
+        Array y(a.rows(), 0.0);
+        hpxpy::timing::result r = hpxpy::timing::measure(
+            [&]() -> double { a.spmv_into(x, y); return y.size() ? y.data()[0] : 0.0; },
+            budget, min_reps, max_reps);
+        return std::make_pair(r.median_s, r.reps);
+    }, "a"_a, "x"_a, "budget"_a = 0.5, "min_reps"_a = 5, "max_reps"_a = 200,
+       "C++-timed median-of-times (s) for the SpMV kernel spmv_into(A, x, y).");
 }

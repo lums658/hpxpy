@@ -65,6 +65,10 @@ public:
     // same memory the wrapper (L1) reduces.
     const double* data() const { return data_ ? data_->data() + offset_ : nullptr; }
 
+    // Mutable base — for kernels in sibling wrappers (e.g. CsrMatrix::spmv) that
+    // write into a freshly-allocated result Array. Same pointer as data().
+    double* mutable_data() { return data_ ? data_->data() + offset_ : nullptr; }
+
     // Element access / scalar write — direct host-memory access (no parallel work,
     // no allocation). Indices are assumed already normalized by the binding layer.
     double getitem(std::size_t i) const { return (data_->data() + offset_)[i]; }

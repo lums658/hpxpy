@@ -13,6 +13,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "array.hpp"
+#include "sparse.hpp"
 #include "timing.hpp"
 
 #include <hpx/algorithm.hpp>
@@ -160,6 +161,67 @@ int hpx_main(int, char**)
     int const threads = static_cast<int>(hpx::get_num_worker_threads());
     for (std::size_t n : g_cfg.sizes)
     {
+        if (g_cfg.op == "spmv" || g_cfg.op == "spmvk")
+        {
+            // spmv  = full op (allocate y each call + kernel) — what the user calls.
+            // spmvk = KERNEL ONLY (y pre-allocated once, reused) — isolates the
+            //         wrapper kernel from the result allocation's first-touch/variance.
+            bool const kernel_only = (g_cfg.op == "spmvk");
+            hpxpy::CsrMatrix A = hpxpy::laplacian_1d(n);
+            hpxpy::Array x = hpxpy::arange(n);
+            hpxpy::Array y(n, 0.0);    // reused buffer (spmvk) / reference for alloc cost
+            const std::int64_t* rp = A.row_ptr_data();
+            const std::int64_t* ci = A.col_idx_data();
+            const double* vp = A.values_data();
+            const double* xp = x.data();
+            double* yp = y.mutable_data();
+            auto kernel = [&] {
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
+                    [rp, ci, vp, xp, yp](std::size_t i) {
+                        double acc = 0.0;
+                        for (std::int64_t k = rp[i]; k < rp[i + 1]; ++k)
+                            acc += vp[k] * xp[ci[k]];
+                        yp[i] = acc;
+                    });
+            };
+            auto l0run = [&]() -> double {
+                if (kernel_only) { kernel(); return yp[0]; }
+                hpxpy::Array yy(n, 0.0);            // full: alloc + kernel
+                double* o = yy.mutable_data();
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
+                    [rp, ci, vp, xp, o](std::size_t i) {
+                        double acc = 0.0;
+                        for (std::int64_t k = rp[i]; k < rp[i + 1]; ++k)
+                            acc += vp[k] * xp[ci[k]];
+                        o[i] = acc;
+                    });
+                return n ? o[0] : 0.0;
+            };
+            auto l1run = [&]() -> double {
+                if (kernel_only) { A.spmv_into(x, y); return yp[0]; }
+                hpxpy::Array yy = A.spmv(x);        // full: alloc + kernel (wrapper)
+                return yy.size() ? yy.data()[0] : 0.0;
+            };
+            auto allocrun = [&]() -> double {        // allocation alone (first-touch)
+                hpxpy::Array yy(n, 0.0);
+                return yy.size() ? yy.data()[0] : 0.0;
+            };
+            hpxpy::timing::result r0 = hpxpy::timing::measure(
+                l0run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+            hpxpy::timing::result r1 = hpxpy::timing::measure(
+                l1run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+            double ta = kernel_only ? 0.0 :
+                hpxpy::timing::measure(allocrun, g_cfg.budget, g_cfg.min_reps,
+                    g_cfg.max_reps).median_s;
+            double t0 = r0.median_s, t1 = r1.median_s;
+            std::printf("op=%s n=%zu threads=%d | L0 %.6gs (%dx) | L1 %.6gs (%dx) | "
+                        "L1/L0=%.3f | alloc=%.6gs\n",
+                g_cfg.op.c_str(), n, threads, t0, r0.reps, t1, r1.reps,
+                t0 > 0 ? t1 / t0 : 0.0, ta);
+            std::fflush(stdout);
+            continue;
+        }
+
         // Arrays built once; both rungs operate on the SAME buffers. Timed by the
         // shared C++ harness (hpxpy::timing) — identical to how the extension and
         // the cross-process baseline are timed. dot/element-wise need a 2nd operand.
@@ -230,6 +292,8 @@ int main(int argc, char** argv)
     hargs.emplace_back(argv[0]);
     if (threads > 0)
         hargs.emplace_back("--hpx:threads=" + std::to_string(threads));
+    // Avoid mmap thread-stack exhaustion (max_map_count) at high thread counts.
+    hargs.emplace_back("--hpx:ini=hpx.stacks.use_guard_pages=0");
     std::vector<char*> hargv;
     for (auto& s : hargs)
         hargv.push_back(s.data());
