@@ -41,3 +41,10 @@ Sparse (CSR)
 .. autofunction:: hpxpy.csr_from
 .. autofunction:: hpxpy.laplacian_1d
 .. autofunction:: hpxpy.spmv
+
+.. autoclass:: hpxpy.DenseMatrix
+   :members:
+
+.. autofunction:: hpxpy.dense_zeros
+.. autofunction:: hpxpy.dense_from
+.. autofunction:: hpxpy.spmm

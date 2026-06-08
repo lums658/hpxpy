@@ -9,6 +9,7 @@
 #pragma once
 
 #include "array.hpp"
+#include "matrix.hpp"
 
 #include <hpx/algorithm.hpp>
 #include <hpx/execution.hpp>
@@ -68,6 +69,43 @@ public:
                 for (std::int64_t k = rp[i]; k < rp[i + 1]; ++k)
                     acc += vp[k] * xp[ci[k]];
                 yp[i] = acc;
+            });
+    }
+
+    // C = A B  (sparse x dense -> dense). B is cols_ x K, C is rows_ x K. Row-parallel:
+    // each output row is a sparse combination of B's rows. spmm() allocates C; the bare
+    // kernel spmm_into writes into an EXISTING C (no alloc) — used for clean kernel
+    // timing (the result alloc otherwise dominates this memory-bound op, see SpMV).
+    DenseMatrix spmm(DenseMatrix const& b) const
+    {
+        if (b.rows() != cols_)
+            throw std::invalid_argument("spmm: B.rows must equal A.cols");
+        DenseMatrix c(rows_, b.cols(), 0.0);
+        if (rows_ != 0 && b.cols() != 0)
+            spmm_into(b, c);
+        return c;
+    }
+
+    void spmm_into(DenseMatrix const& b, DenseMatrix& c) const
+    {
+        std::size_t const K = b.cols();
+        const std::int64_t* rp = row_ptr_->data();
+        const std::int64_t* ci = nnz_ ? col_idx_->data() : nullptr;
+        const double* vp = nnz_ ? values_->data() : nullptr;
+        const double* bp = b.data();
+        double* cp = c.mutable_data();
+        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), rows_,
+            [rp, ci, vp, bp, cp, K](std::size_t i) {
+                double* crow = cp + i * K;
+                for (std::size_t cc = 0; cc < K; ++cc)
+                    crow[cc] = 0.0;
+                for (std::int64_t k = rp[i]; k < rp[i + 1]; ++k)
+                {
+                    double const v = vp[k];
+                    const double* brow = bp + static_cast<std::size_t>(ci[k]) * K;
+                    for (std::size_t cc = 0; cc < K; ++cc)
+                        crow[cc] += v * brow[cc];
+                }
             });
     }
 

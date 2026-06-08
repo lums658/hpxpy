@@ -122,6 +122,40 @@ int hpx_main(int, char**)
             continue;
         }
 
+        if (g_cfg.op == "spmm")    // direct C++ HPX sparse x dense baseline (kernel)
+        {
+            std::size_t const K = 16;
+            hpxpy::CsrMatrix A = hpxpy::laplacian_1d(n);
+            hpxpy::DenseMatrix B(n, K, 1.0);
+            hpxpy::DenseMatrix C(n, K, 0.0);
+            const std::int64_t* rp = A.row_ptr_data();
+            const std::int64_t* ci = A.col_idx_data();
+            const double* vp = A.values_data();
+            const double* bp = B.data();
+            double* cp = C.mutable_data();
+            auto run = [&]() -> double {
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
+                    [rp, ci, vp, bp, cp, K](std::size_t i) {
+                        double* crow = cp + i * K;
+                        for (std::size_t c = 0; c < K; ++c) crow[c] = 0.0;
+                        for (std::int64_t k = rp[i]; k < rp[i + 1]; ++k) {
+                            double const v = vp[k];
+                            const double* brow = bp + static_cast<std::size_t>(ci[k]) * K;
+                            for (std::size_t c = 0; c < K; ++c) crow[c] += v * brow[c];
+                        }
+                    });
+                return cp[0];
+            };
+            hpxpy::timing::result r =
+                hpxpy::timing::measure(run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+            double value = run();
+            std::printf("{\"op\": \"spmm\", \"n\": %zu, \"threads\": %d, \"impl\": \"cpp\", "
+                        "\"median_s\": %.12g, \"reps\": %d, \"value\": %.12g}\n",
+                n, threads, r.median_s, r.reps, value);
+            std::fflush(stdout);
+            continue;
+        }
+
         std::string const& op = g_cfg.op;
         bool const needs_b =
             (op == "dot" || op == "add" || op == "sub" || op == "mul" || op == "div");

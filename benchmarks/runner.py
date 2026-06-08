@@ -165,7 +165,7 @@ _BINARY_OPS = ("add", "sub", "mul", "div")
 
 def available_ops() -> list[str]:
     """Names the runner can measure. Grows as milestones add Array operations."""
-    return ["sum", "min", "max", "dot", *_BINARY_OPS, "spmv"]
+    return ["sum", "min", "max", "dot", *_BINARY_OPS, "spmv", "spmm"]
 
 
 def run_points(op, sizes, threads, budget, min_reps, max_reps):  # pragma: no cover - HPX
@@ -192,6 +192,11 @@ def run_points(op, sizes, threads, budget, min_reps, max_reps):  # pragma: no co
         elif op == "spmv":
             # A @ x with A = 1-D Laplacian (≈3 nnz/row), x = arange(n)
             median_s, reps = _core.bench_spmv(hpx.laplacian_1d(n), a,
+                                              budget, min_reps, max_reps)
+        elif op == "spmm":
+            # C = A @ B with A = Laplacian(n), B dense n x 16
+            median_s, reps = _core.bench_spmm(hpx.laplacian_1d(n),
+                                              hpx.dense_zeros(n, 16),
                                               budget, min_reps, max_reps)
         else:
             median_s, reps = _core.bench(a, op, budget, min_reps, max_reps)
