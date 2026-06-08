@@ -152,6 +152,18 @@ NB_MODULE(_core, m)
             nb::gil_scoped_release release;
             return a.dot(b);
         }, "b"_a, "Fused dot product (single-pass transform_reduce).")
+        .def("copy", [](Array const& a) {
+            nb::gil_scoped_release r; return a.copy();
+        }, "Deep copy to a new Array (numpy a.copy()).")
+        .def("sort", [](Array& a) {
+            nb::gil_scoped_release r; a.sort();
+        }, "Sort ascending IN PLACE (numpy a.sort(); returns None).")
+        .def("is_sorted", [](Array const& a) {
+            nb::gil_scoped_release r; return a.is_sorted();
+        }, "True if ascending (hpx::is_sorted).")
+        .def("cumsum", [](Array const& a) {
+            nb::gil_scoped_release r; return a.cumsum();
+        }, "Inclusive prefix sum -> new Array (numpy a.cumsum()).")
         // Element-wise binary ops -> new Array (hpx::transform). Operators and the
         // NumPy-style named methods share one kernel; GIL released around the work.
         .def("add", [](Array const& a, Array const& b) {

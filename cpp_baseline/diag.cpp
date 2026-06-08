@@ -87,6 +87,17 @@ double l0(std::string const& op, double const* p, double const* q, std::size_t n
     // ladder isolates the wrapper call, not the allocation path.
     auto outp = std::make_shared<hpxpy::dvec>(n);
     double* o = outp->data();
+    if (op == "sort")    // copy + sort (repeatable: re-copies the input each call)
+    {
+        hpx::copy(hpx::execution::par, p, p + n, o);
+        hpx::sort(hpx::execution::par, o, o + n);
+        return n ? o[0] : 0.0;
+    }
+    if (op == "scan")    // inclusive prefix sum
+    {
+        hpx::inclusive_scan(hpx::execution::par, p, p + n, o);
+        return n ? o[n - 1] : 0.0;
+    }
     if (op == "muls")    // scalar broadcast (unary transform): x * s (runtime s)
     {
         double const s = g_cfg.scalar;
@@ -117,6 +128,17 @@ double l1(std::string const& op, hpxpy::Array const& a, hpxpy::Array const& b)
         return a.max();
     if (op == "dot")
         return a.dot(b);
+    if (op == "sort")    // copy + in-place sort (the exact wrapper path of hpx.sort)
+    {
+        hpxpy::Array c = a.copy();
+        c.sort();
+        return c.size() ? c.data()[0] : 0.0;
+    }
+    if (op == "scan")
+    {
+        hpxpy::Array c = a.cumsum();
+        return c.size() ? c.data()[c.size() - 1] : 0.0;
+    }
     hpxpy::Array res;
     if (op == "muls")    // scalar broadcast (the exact wrapper method)
         res = a.mul_scalar(g_cfg.scalar);

@@ -116,6 +116,49 @@ public:
     Array div_scalar(double s) const { return unary([s](double x) { return x / s; }); }
     Array rdiv_scalar(double s) const { return unary([s](double x) { return s / x; }); }
 
+    // Deep copy -> a new independent Array (numpy a.copy()).
+    Array copy() const
+    {
+        Array r;
+        r.size_ = size_;
+        std::size_t const n = size_;
+        const double* p = n ? data_->data() : nullptr;
+        on_hpx_thread([&] { r.data_ = std::make_shared<dvec>(n); });
+        double* out = n ? r.data_->data() : nullptr;
+        hpx::copy(hpx::execution::par, p, p + n, out);
+        return r;
+    }
+
+    // Sort ascending IN PLACE (numpy a.sort(); mutates the buffer, no allocation).
+    // The sorted copy form is hpx.sort(a) == a.copy() then .sort() (numpy np.sort).
+    void sort()
+    {
+        if (size_ < 2)
+            return;
+        double* p = data_->data();
+        hpx::sort(hpx::execution::par, p, p + size_);
+    }
+    bool is_sorted() const
+    {
+        if (size_ < 2)
+            return true;
+        const double* p = data_->data();
+        return hpx::is_sorted(hpx::execution::par, p, p + size_);
+    }
+
+    // Inclusive prefix sum -> a NEW Array (numpy a.cumsum()).
+    Array cumsum() const
+    {
+        Array r;
+        r.size_ = size_;
+        std::size_t const n = size_;
+        const double* p = n ? data_->data() : nullptr;
+        on_hpx_thread([&] { r.data_ = std::make_shared<dvec>(n); });
+        double* out = n ? r.data_->data() : nullptr;
+        hpx::inclusive_scan(hpx::execution::par, p, p + n, out);
+        return r;
+    }
+
     // 0, 1, 2, ..., n-1. The block_allocator first-touches at construction; the
     // parallel for_loop writes the ramp on the same HPX workers (stays NUMA-local).
     static Array iota(std::size_t n)
