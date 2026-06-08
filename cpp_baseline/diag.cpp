@@ -222,6 +222,43 @@ int hpx_main(int, char**)
             continue;
         }
 
+        if (g_cfg.op == "spmm")    // sparse x dense, kernel-only (C pre-allocated)
+        {
+            std::size_t const K = 16;
+            hpxpy::CsrMatrix A = hpxpy::laplacian_1d(n);
+            hpxpy::DenseMatrix B(n, K, 1.0);
+            hpxpy::DenseMatrix C(n, K, 0.0);    // reused
+            const std::int64_t* rp = A.row_ptr_data();
+            const std::int64_t* ci = A.col_idx_data();
+            const double* vp = A.values_data();
+            const double* bp = B.data();
+            double* cp = C.mutable_data();
+            auto l0run = [&]() -> double {
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
+                    [rp, ci, vp, bp, cp, K](std::size_t i) {
+                        double* crow = cp + i * K;
+                        for (std::size_t c = 0; c < K; ++c) crow[c] = 0.0;
+                        for (std::int64_t k = rp[i]; k < rp[i + 1]; ++k) {
+                            double const v = vp[k];
+                            const double* brow = bp + static_cast<std::size_t>(ci[k]) * K;
+                            for (std::size_t c = 0; c < K; ++c) crow[c] += v * brow[c];
+                        }
+                    });
+                return cp[0];
+            };
+            auto l1run = [&]() -> double { A.spmm_into(B, C); return cp[0]; };
+            hpxpy::timing::result r0 = hpxpy::timing::measure(
+                l0run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+            hpxpy::timing::result r1 = hpxpy::timing::measure(
+                l1run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+            double t0 = r0.median_s, t1 = r1.median_s;
+            std::printf("op=spmm n=%zu K=%zu threads=%d | L0 %.6gs (%dx) | "
+                        "L1 %.6gs (%dx) | L1/L0=%.3f\n",
+                n, K, threads, t0, r0.reps, t1, r1.reps, t0 > 0 ? t1 / t0 : 0.0);
+            std::fflush(stdout);
+            continue;
+        }
+
         // Arrays built once; both rungs operate on the SAME buffers. Timed by the
         // shared C++ harness (hpxpy::timing) — identical to how the extension and
         // the cross-process baseline are timed. dot/element-wise need a 2nd operand.

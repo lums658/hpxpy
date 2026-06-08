@@ -17,6 +17,9 @@ Array = _core.Array
 #: A CSR (compressed sparse row) float64 matrix (see :func:`csr_from`, :func:`laplacian_1d`).
 CsrMatrix = _core.CsrMatrix
 
+#: A row-major 2-D dense float64 matrix (SpMM operand/result; see :func:`dense_zeros`).
+DenseMatrix = _core.DenseMatrix
+
 __version__ = "0.0.1"
 
 _initialized = False
@@ -99,6 +102,21 @@ def spmv(a: CsrMatrix, x: Array) -> Array:
     return a.spmv(x)
 
 
+def dense_zeros(rows: int, cols: int) -> DenseMatrix:
+    """Create a ``rows``×``cols`` dense matrix of zeros (NUMA-aware)."""
+    return _core.dense_zeros(int(rows), int(cols))
+
+
+def dense_from(rows: int, cols: int, values) -> DenseMatrix:
+    """Create a ``rows``×``cols`` dense matrix from a row-major flat sequence."""
+    return _core.dense_from(int(rows), int(cols), values)
+
+
+def spmm(a: CsrMatrix, b: DenseMatrix) -> DenseMatrix:
+    """Sparse × dense product ``A @ B`` (parallel; ``a.spmm(b)``)."""
+    return a.spmm(b)
+
+
 def zeros(n: int) -> Array:
     """Create an :class:`Array` of ``n`` zeros (NUMA-aware HPX allocation)."""
     return _core.zeros(int(n))
@@ -141,6 +159,10 @@ __all__ = [
     "csr_from",
     "laplacian_1d",
     "spmv",
+    "DenseMatrix",
+    "dense_zeros",
+    "dense_from",
+    "spmm",
     "num_worker_threads",
     "hpx_version",
     "__version__",
