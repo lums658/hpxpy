@@ -14,7 +14,7 @@ Array
 
 .. autoclass:: hpxpy.Array
    :members:
-   :special-members: __len__
+   :special-members: __len__, __getitem__, __setitem__
 
 Constructors
 ------------
