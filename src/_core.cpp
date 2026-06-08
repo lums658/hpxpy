@@ -216,6 +216,38 @@ NB_MODULE(_core, m)
         .def("__rtruediv__", [](Array const& a, double s) {
             nb::gil_scoped_release r; return a.rdiv_scalar(s);    // s / a
         })
+        // Indexing: a[i] -> float, a[i:j] -> contiguous VIEW (shares memory).
+        // Index/bounds normalization (numpy semantics) lives here; the wrapper is raw.
+        .def("__getitem__", [](Array const& a, nb::object key) -> nb::object {
+            if (PySlice_Check(key.ptr())) {
+                Py_ssize_t start, stop, step;
+                if (PySlice_Unpack(key.ptr(), &start, &stop, &step) < 0)
+                    throw nb::python_error();
+                Py_ssize_t const n =
+                    PySlice_AdjustIndices((Py_ssize_t) a.size(), &start, &stop, step);
+                if (step != 1)
+                    throw nb::value_error(
+                        "hpxpy.Array supports only contiguous slices (step == 1)");
+                return nb::cast(a.view((std::size_t) start, (std::size_t) n));
+            }
+            Py_ssize_t i = PyNumber_AsSsize_t(key.ptr(), PyExc_IndexError);
+            if (i == -1 && PyErr_Occurred())
+                throw nb::python_error();
+            Py_ssize_t const n = (Py_ssize_t) a.size();
+            if (i < 0)
+                i += n;
+            if (i < 0 || i >= n)
+                throw nb::index_error("Array index out of range");
+            return nb::cast(a.getitem((std::size_t) i));
+        }, "a[i] -> float; a[i:j] -> a contiguous view sharing memory (step must be 1).")
+        .def("__setitem__", [](Array& a, Py_ssize_t i, double v) {
+            Py_ssize_t const n = (Py_ssize_t) a.size();
+            if (i < 0)
+                i += n;
+            if (i < 0 || i >= n)
+                throw nb::index_error("Array index out of range");
+            a.setitem((std::size_t) i, v);
+        }, "a[i] = value (write a single element).")
         .def("__len__", &Array::size)
         .def("__repr__", [](Array const& a) {
             return "Array(size=" + std::to_string(a.size()) + ")";
