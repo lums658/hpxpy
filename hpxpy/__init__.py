@@ -66,6 +66,21 @@ def dot(a: Array, b: Array) -> float:
     return a.dot(b)
 
 
+def sort(a: Array) -> Array:
+    """Return a new ascending sorted Array (like ``numpy.sort``; ``a`` is unchanged).
+
+    In-place sorting is the method ``a.sort()`` (like ``numpy.ndarray.sort``).
+    """
+    c = a.copy()
+    c.sort()
+    return c
+
+
+def cumsum(a: Array) -> Array:
+    """Inclusive prefix sum of ``a`` (parallel ``hpx::inclusive_scan``)."""
+    return a.cumsum()
+
+
 def zeros(n: int) -> Array:
     """Create an :class:`Array` of ``n`` zeros (NUMA-aware HPX allocation)."""
     return _core.zeros(int(n))
@@ -102,6 +117,8 @@ __all__ = [
     "min",
     "max",
     "dot",
+    "sort",
+    "cumsum",
     "num_worker_threads",
     "hpx_version",
     "__version__",
