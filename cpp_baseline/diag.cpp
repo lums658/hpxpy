@@ -222,6 +222,101 @@ int hpx_main(int, char**)
             continue;
         }
 
+        // Strided sum: n is the length of the BACKING buffer; stride=2, view_len=n/2.
+        // L0 and L1 BOTH time the KERNEL ONLY — the buffer and the strided view are
+        // built ONCE outside the timed region, just like the contiguous cases above.
+        if (g_cfg.op == "strided_sum" || g_cfg.op == "strided_muls")
+        {
+            std::size_t const stride = 2;
+            // Back buffer: 2× the requested size so the strided view covers n elements.
+            std::size_t const full_n = n * stride;
+            std::size_t const view_n = n;    // logical length of the strided view
+
+            // Build the backing Array once (allocates the NUMA buffer, first-touch).
+            hpxpy::Array backing = hpxpy::arange(full_n);
+            // Take the strided view once — zero-copy, same buffer.
+            hpxpy::Array sv = backing.view_strided(0, view_n,
+                static_cast<std::ptrdiff_t>(stride));
+
+            double const* base_ptr = backing.data();    // raw pointer into the buffer
+            double const sc = g_cfg.scalar;             // runtime scalar (no const-fold)
+
+            if (g_cfg.op == "strided_sum")
+            {
+                // L0: direct for_loop+reduction over base_ptr[i*stride].
+                auto l0run = [&]() -> double {
+                    double r = 0.0;
+                    hpx::experimental::for_loop(hpx::execution::par,
+                        std::size_t(0), view_n,
+                        hpx::experimental::reduction(r, 0.0, std::plus<double>{}),
+                        [base_ptr, stride](std::size_t i, double& acc) {
+                            acc += base_ptr[i * stride];
+                        });
+                    return r;
+                };
+                // L1: the exact wrapper method on the strided Array view.
+                auto l1run = [&]() -> double { return sv.sum(); };
+
+                hpxpy::timing::result r0 = hpxpy::timing::measure(
+                    l0run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+                hpxpy::timing::result r1 = hpxpy::timing::measure(
+                    l1run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+                double v0 = l0run(), v1 = l1run();
+                double t0 = r0.median_s, t1 = r1.median_s;
+                double g0 = t0 > 0 ? view_n / t0 / 1e9 : 0.0;
+                double g1 = t1 > 0 ? view_n / t1 / 1e9 : 0.0;
+                std::printf(
+                    "op=strided_sum n=%zu stride=%zu view_n=%zu threads=%d | "
+                    "L0 %.6gs %.2f GEl/s (%dx) | L1 %.6gs %.2f GEl/s (%dx) | "
+                    "L1/L0=%.3f%s\n",
+                    full_n, stride, view_n, threads,
+                    t0, g0, r0.reps, t1, g1, r1.reps,
+                    t0 > 0 ? t1 / t0 : 0.0,
+                    (v0 == v1) ? "" : "  [VALUE MISMATCH]");
+                std::fflush(stdout);
+            }
+            else    // strided_muls: scalar multiply a[::2] * scalar -> new buffer
+            {
+                // L0: allocate a fresh result buffer + for_loop (mirrors what L1 does
+                // via mul_scalar: alloc + transform). Both sides allocate in the timed
+                // region so the comparison is symmetric (same as contiguous muls).
+                auto l0run = [&]() -> double {
+                    auto outp = std::make_shared<hpxpy::dvec>(view_n);
+                    double* o = outp->data();
+                    hpx::experimental::for_loop(hpx::execution::par,
+                        std::size_t(0), view_n,
+                        [base_ptr, stride, sc, o](std::size_t i) {
+                            o[i] = base_ptr[i * stride] * sc;
+                        });
+                    return view_n ? o[0] : 0.0;
+                };
+                // L1: the exact wrapper method (unary path with stride!=1).
+                auto l1run = [&]() -> double {
+                    hpxpy::Array res = sv.mul_scalar(sc);
+                    return res.size() ? res.data()[0] : 0.0;
+                };
+
+                hpxpy::timing::result r0 = hpxpy::timing::measure(
+                    l0run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+                hpxpy::timing::result r1 = hpxpy::timing::measure(
+                    l1run, g_cfg.budget, g_cfg.min_reps, g_cfg.max_reps);
+                double v0 = l0run(), v1 = l1run();
+                double t0 = r0.median_s, t1 = r1.median_s;
+                double g0 = t0 > 0 ? view_n / t0 / 1e9 : 0.0;
+                double g1 = t1 > 0 ? view_n / t1 / 1e9 : 0.0;
+                std::printf(
+                    "op=strided_muls n=%zu stride=%zu view_n=%zu scalar=%.1f threads=%d | "
+                    "L0 %.6gs %.2f GEl/s (%dx) | L1 %.6gs %.2f GEl/s (%dx) | "
+                    "L1/L0=%.3f%s\n",
+                    full_n, stride, view_n, sc, threads,
+                    t0, g0, r0.reps, t1, g1, r1.reps,
+                    t0 > 0 ? t1 / t0 : 0.0,
+                    (v0 == v1) ? "" : "  [VALUE MISMATCH]");
+                std::fflush(stdout);
+            }
+            continue;
+        }
+
         if (g_cfg.op == "spmm")    // sparse x dense, kernel-only (C pre-allocated)
         {
             std::size_t const K = 16;
