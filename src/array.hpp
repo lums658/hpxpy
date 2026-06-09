@@ -12,6 +12,11 @@
 // Operations ARE HPX algorithms run in place over base_ — no copies, no reassembly,
 // no between-layers buffers. Nothing here depends on nanobind/Python.
 //
+// Strided views (stride_ != 1): element i lives at base_[i*stride_]. A signed
+// stride_ supports reverse views (negative step). When stride_==1 the original
+// contiguous fast-path (raw pointer range) is taken unchanged, so contiguous
+// performance is unaffected.
+//
 // SPDX-License-Identifier: MIT
 #pragma once
 
@@ -28,6 +33,7 @@
 #include <memory>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace hpxpy {
 
@@ -55,6 +61,7 @@ public:
 
     std::size_t size() const { return size_; }
     std::size_t ndim() const { return 1; }
+    std::ptrdiff_t stride() const { return stride_; }
 
     // Start of this array's data (nullptr if empty). The const form is also used by
     // the diagnostic and by to_numpy (zero-copy export).
@@ -63,8 +70,8 @@ public:
 
     // Element access / scalar write — direct host-memory access (no parallel work).
     // Indices are assumed already normalized by the binding layer.
-    double getitem(std::size_t i) const { return base_[i]; }
-    void setitem(std::size_t i, double v) { base_[i] = v; }
+    double getitem(std::size_t i) const { return base_[static_cast<std::ptrdiff_t>(i) * stride_]; }
+    void setitem(std::size_t i, double v) { base_[static_cast<std::ptrdiff_t>(i) * stride_] = v; }
 
     // Slice assignment a[start:start+n] = ... (contiguous; binding computes start/n).
     // fill_range broadcasts a scalar; assign_range copies an Array of length n in.
@@ -85,7 +92,20 @@ public:
     {
         Array r;
         r.owner_ = owner_;    // share the keep-alive (owned or borrowed parent)
-        r.base_ = base_ ? base_ + start : nullptr;
+        r.base_ = base_ ? base_ + static_cast<std::ptrdiff_t>(start) * stride_ : nullptr;
+        r.size_ = n;
+        r.stride_ = stride_;
+        return r;
+    }
+
+    // Strided view: element i is at base_[i*result.stride_] in the result.
+    // start and step are in THIS array's logical index space; step may be negative.
+    Array view_strided(std::ptrdiff_t start, std::size_t n, std::ptrdiff_t step) const
+    {
+        Array r;
+        r.owner_ = owner_;
+        r.base_ = base_ ? base_ + start * stride_ : nullptr;
+        r.stride_ = stride_ * step;
         r.size_ = n;
         return r;
     }
@@ -103,40 +123,89 @@ public:
     }
 
     // Reductions — thin wrappers over HPX algorithms, run in place on the buffer.
+    // Contiguous path (stride==1): raw pointer range passed to hpx::reduce.
+    // Strided path: hpx::experimental::for_loop with reduction object, zero-copy.
     double sum() const
     {
         if (size_ == 0)
             return 0.0;
-        return hpx::reduce(hpx::execution::par, base_, base_ + size_, 0.0);
+        if (stride_ == 1)
+            return hpx::reduce(hpx::execution::par, base_, base_ + size_, 0.0);
+        double r = 0.0;
+        double* b = base_;
+        std::ptrdiff_t s = stride_;
+        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+            hpx::experimental::reduction(r, 0.0, std::plus<double>{}),
+            [b, s](std::size_t i, double& acc) { acc += b[static_cast<std::ptrdiff_t>(i) * s]; });
+        return r;
     }
     double min() const
     {
         if (size_ == 0)
             throw std::invalid_argument("min() of an empty Array");
-        return hpx::reduce(hpx::execution::par, base_, base_ + size_,
-            std::numeric_limits<double>::infinity(),
-            [](double x, double y) { return x < y ? x : y; });
+        if (stride_ == 1)
+            return hpx::reduce(hpx::execution::par, base_, base_ + size_,
+                std::numeric_limits<double>::infinity(),
+                [](double x, double y) { return x < y ? x : y; });
+        double r = std::numeric_limits<double>::infinity();
+        double* b = base_;
+        std::ptrdiff_t s = stride_;
+        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+            hpx::experimental::reduction(r, std::numeric_limits<double>::infinity(),
+                [](double x, double y) { return x < y ? x : y; }),
+            [b, s](std::size_t i, double& acc) {
+                double v = b[static_cast<std::ptrdiff_t>(i) * s];
+                if (v < acc) acc = v;
+            });
+        return r;
     }
     double max() const
     {
         if (size_ == 0)
             throw std::invalid_argument("max() of an empty Array");
-        return hpx::reduce(hpx::execution::par, base_, base_ + size_,
-            -std::numeric_limits<double>::infinity(),
-            [](double x, double y) { return x > y ? x : y; });
+        if (stride_ == 1)
+            return hpx::reduce(hpx::execution::par, base_, base_ + size_,
+                -std::numeric_limits<double>::infinity(),
+                [](double x, double y) { return x > y ? x : y; });
+        double r = -std::numeric_limits<double>::infinity();
+        double* b = base_;
+        std::ptrdiff_t s = stride_;
+        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+            hpx::experimental::reduction(r, -std::numeric_limits<double>::infinity(),
+                [](double x, double y) { return x > y ? x : y; }),
+            [b, s](std::size_t i, double& acc) {
+                double v = b[static_cast<std::ptrdiff_t>(i) * s];
+                if (v > acc) acc = v;
+            });
+        return r;
     }
-    // Fused dot product: a SINGLE pass (multiply+accumulate) via transform_reduce.
+    // Fused dot product: a SINGLE pass (multiply+accumulate) via transform_reduce
+    // (contiguous) or for_loop reduction (strided).
     double dot(Array const& other) const
     {
         if (size_ != other.size_)
             throw std::invalid_argument("dot(): size mismatch");
         if (size_ == 0)
             return 0.0;
-        return hpx::transform_reduce(
-            hpx::execution::par, base_, base_ + size_, other.base_, 0.0);
+        if (stride_ == 1 && other.stride_ == 1)
+            return hpx::transform_reduce(
+                hpx::execution::par, base_, base_ + size_, other.base_, 0.0);
+        double r = 0.0;
+        double* ba = base_;
+        double* bb = other.base_;
+        std::ptrdiff_t sa = stride_;
+        std::ptrdiff_t sb = other.stride_;
+        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+            hpx::experimental::reduction(r, 0.0, std::plus<double>{}),
+            [ba, bb, sa, sb](std::size_t i, double& acc) {
+                acc += ba[static_cast<std::ptrdiff_t>(i) * sa] *
+                       bb[static_cast<std::ptrdiff_t>(i) * sb];
+            });
+        return r;
     }
 
-    // Element-wise binary ops -> a NEW (owning) Array. One hpx::transform pass.
+    // Element-wise binary ops -> a NEW (owning) Array. One hpx::transform pass
+    // (contiguous) or for_loop element-wise (strided; result is always contiguous).
     Array add(Array const& o) const { return binary(o, std::plus<double>{}); }
     Array sub(Array const& o) const { return binary(o, std::minus<double>{}); }
     Array mul(Array const& o) const { return binary(o, std::multiplies<double>{}); }
@@ -155,32 +224,85 @@ public:
     {
         Array r;
         r.alloc_(size_);
-        if (size_)
-            hpx::copy(hpx::execution::par, base_, base_ + size_, r.base_);
+        if (size_) {
+            if (stride_ == 1) {
+                hpx::copy(hpx::execution::par, base_, base_ + size_, r.base_);
+            } else {
+                double* src = base_;
+                double* dst = r.base_;
+                std::ptrdiff_t s = stride_;
+                hpx::experimental::for_loop(hpx::execution::par,
+                    std::size_t(0), size_,
+                    [src, dst, s](std::size_t i) {
+                        dst[i] = src[static_cast<std::ptrdiff_t>(i) * s];
+                    });
+            }
+        }
         return r;
     }
 
     // Sort ascending IN PLACE (numpy a.sort(); mutates this view's range, no alloc).
+    // Strided: gather into a temporary contiguous buffer, sort, scatter back.
     void sort()
     {
         if (size_ < 2)
             return;
-        hpx::sort(hpx::execution::par, base_, base_ + size_);
+        if (stride_ == 1) {
+            hpx::sort(hpx::execution::par, base_, base_ + size_);
+        } else {
+            // Gather strided elements into a temporary contiguous dvec, sort, scatter.
+            double* src = base_;
+            std::ptrdiff_t s = stride_;
+            std::vector<double> tmp(size_);
+            for (std::size_t i = 0; i < size_; ++i)
+                tmp[i] = src[static_cast<std::ptrdiff_t>(i) * s];
+            hpx::sort(hpx::execution::par, tmp.begin(), tmp.end());
+            for (std::size_t i = 0; i < size_; ++i)
+                src[static_cast<std::ptrdiff_t>(i) * s] = tmp[i];
+        }
     }
     bool is_sorted() const
     {
         if (size_ < 2)
             return true;
-        return hpx::is_sorted(hpx::execution::par, base_, base_ + size_);
+        if (stride_ == 1)
+            return hpx::is_sorted(hpx::execution::par, base_, base_ + size_);
+        // Strided: one zero-copy pass — AND-reduce "each logical element <= its
+        // successor" over the n-1 adjacent pairs (no gather).
+        bool ok = true;
+        double* b = base_;
+        std::ptrdiff_t s = stride_;
+        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_ - 1,
+            hpx::experimental::reduction(ok, true, std::logical_and<bool>{}),
+            [b, s](std::size_t i, bool& acc) {
+                acc = acc && (b[static_cast<std::ptrdiff_t>(i) * s] <=
+                              b[(static_cast<std::ptrdiff_t>(i) + 1) * s]);
+            });
+        return ok;
     }
 
     // Inclusive prefix sum -> a NEW (owning) Array (numpy a.cumsum()).
+    // Strided: gather into the result buffer then do the scan in place.
     Array cumsum() const
     {
         Array r;
         r.alloc_(size_);
-        if (size_)
-            hpx::inclusive_scan(hpx::execution::par, base_, base_ + size_, r.base_);
+        if (size_) {
+            if (stride_ == 1) {
+                hpx::inclusive_scan(hpx::execution::par, base_, base_ + size_, r.base_);
+            } else {
+                double* src = base_;
+                double* dst = r.base_;
+                std::ptrdiff_t s = stride_;
+                // Gather strided into contiguous result, then scan in place.
+                hpx::experimental::for_loop(hpx::execution::par,
+                    std::size_t(0), size_,
+                    [src, dst, s](std::size_t i) {
+                        dst[i] = src[static_cast<std::ptrdiff_t>(i) * s];
+                    });
+                hpx::inclusive_scan(hpx::execution::par, dst, dst + size_, dst);
+            }
+        }
         return r;
     }
 
@@ -217,8 +339,20 @@ private:
     {
         Array r;
         r.alloc_(size_);
-        if (size_)
-            hpx::transform(hpx::execution::par, base_, base_ + size_, r.base_, op);
+        if (size_) {
+            if (stride_ == 1) {
+                hpx::transform(hpx::execution::par, base_, base_ + size_, r.base_, op);
+            } else {
+                double* src = base_;
+                double* dst = r.base_;
+                std::ptrdiff_t s = stride_;
+                hpx::experimental::for_loop(hpx::execution::par,
+                    std::size_t(0), size_,
+                    [src, dst, s, op](std::size_t i) {
+                        dst[i] = op(src[static_cast<std::ptrdiff_t>(i) * s]);
+                    });
+            }
+        }
         return r;
     }
 
@@ -229,15 +363,31 @@ private:
             throw std::invalid_argument("element-wise op: size mismatch");
         Array r;
         r.alloc_(size_);
-        if (size_)
-            hpx::transform(
-                hpx::execution::par, base_, base_ + size_, o.base_, r.base_, op);
+        if (size_) {
+            if (stride_ == 1 && o.stride_ == 1) {
+                hpx::transform(
+                    hpx::execution::par, base_, base_ + size_, o.base_, r.base_, op);
+            } else {
+                double* ba = base_;
+                double* bb = o.base_;
+                double* dst = r.base_;
+                std::ptrdiff_t sa = stride_;
+                std::ptrdiff_t sb = o.stride_;
+                hpx::experimental::for_loop(hpx::execution::par,
+                    std::size_t(0), size_,
+                    [ba, bb, dst, sa, sb, op](std::size_t i) {
+                        dst[i] = op(ba[static_cast<std::ptrdiff_t>(i) * sa],
+                                    bb[static_cast<std::ptrdiff_t>(i) * sb]);
+                    });
+            }
+        }
         return r;
     }
 
     std::shared_ptr<void> owner_;    // keeps the backing alive (dvec, or numpy ref)
     double* base_ = nullptr;         // start of this array's data (offset folded in)
     std::size_t size_ = 0;
+    std::ptrdiff_t stride_ = 1;      // element stride (1 = contiguous, negative = reverse)
 };
 
 inline Array zeros(std::size_t n) { return Array(n, 0.0); }

@@ -51,10 +51,13 @@ def test_empty_slice():
     assert hpx.arange(10)[5:5].size == 0
 
 
-def test_step_not_supported():
+def test_strided_slice_step_assignment_not_supported():
+    # Strided READ (a[::2]) now returns a strided view; only ASSIGNMENT is unsupported.
     a = hpx.arange(10)
+    v = a[::2]                  # must not raise
+    assert v.size == 5
     with pytest.raises(ValueError):
-        a[::2]
+        a[::2] = 0.0            # strided assignment: deferred, raises ValueError
 
 
 # --- views compose with the existing ops ------------------------------------

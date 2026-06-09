@@ -133,10 +133,19 @@ using np_out = nb::ndarray<nb::numpy, double, nb::ndim<1>>;
 
 // Zero-copy NumPy view of an Array. `obj` (the Array Python object) is the ndarray's
 // owner, so the HPX buffer outlives the view. Writable; works for slice views too.
+// For strided views (stride != 1) the DLPack element stride is passed so numpy sees
+// the correct view without a copy. Negative strides (reverse views) are also passed
+// through — numpy supports them as long as base_ points to the first logical element.
 np_out to_numpy_view(nb::object obj)
 {
     Array& a = nb::cast<Array&>(obj);
-    return np_out(a.mutable_data(), {a.size()}, obj);
+    std::ptrdiff_t s = a.stride();
+    if (s == 1) {
+        return np_out(a.mutable_data(), {a.size()}, obj);
+    }
+    // Pass the element stride so numpy sees a strided (possibly negative-stride) view.
+    return np_out(a.mutable_data(), {a.size()}, obj,
+                  {static_cast<int64_t>(s)});
 }
 
 }  // namespace
@@ -155,6 +164,7 @@ NB_MODULE(_core, m)
     nb::class_<Array>(m, "Array")
         .def_prop_ro("size", &Array::size)
         .def_prop_ro("ndim", &Array::ndim)
+        .def_prop_ro("stride", &Array::stride)
         .def("sum", [](Array const& a) {
             nb::gil_scoped_release release;
             return a.sum();
@@ -236,6 +246,7 @@ NB_MODULE(_core, m)
             nb::gil_scoped_release r; return a.rdiv_scalar(s);    // s / a
         })
         // Indexing: a[i] -> float, a[i:j] -> contiguous VIEW (shares memory).
+        // a[i:j:k] with k != 1 -> strided VIEW (shares memory, no copy).
         // Index/bounds normalization (numpy semantics) lives here; the wrapper is raw.
         .def("__getitem__", [](Array const& a, nb::object key) -> nb::object {
             if (PySlice_Check(key.ptr())) {
@@ -244,10 +255,12 @@ NB_MODULE(_core, m)
                     throw nb::python_error();
                 Py_ssize_t const n =
                     PySlice_AdjustIndices((Py_ssize_t) a.size(), &start, &stop, step);
-                if (step != 1)
-                    throw nb::value_error(
-                        "hpxpy.Array supports only contiguous slices (step == 1)");
-                return nb::cast(a.view((std::size_t) start, (std::size_t) n));
+                if (step == 1)
+                    return nb::cast(a.view((std::size_t) start, (std::size_t) n));
+                // Strided slice (including step==-1 for reverse): zero-copy view.
+                return nb::cast(a.view_strided((std::ptrdiff_t) start,
+                                               (std::size_t) n,
+                                               (std::ptrdiff_t) step));
             }
             Py_ssize_t i = PyNumber_AsSsize_t(key.ptr(), PyExc_IndexError);
             if (i == -1 && PyErr_Occurred())
@@ -258,7 +271,7 @@ NB_MODULE(_core, m)
             if (i < 0 || i >= n)
                 throw nb::index_error("Array index out of range");
             return nb::cast(a.getitem((std::size_t) i));
-        }, "a[i] -> float; a[i:j] -> a contiguous view sharing memory (step must be 1).")
+        }, "a[i] -> float; a[i:j] -> contiguous view; a[i:j:k] -> strided view (zero-copy).")
         .def("__setitem__", [](Array& a, nb::object key, nb::object value) {
             if (PySlice_Check(key.ptr())) {
                 Py_ssize_t start, stop, step;
