@@ -259,14 +259,39 @@ NB_MODULE(_core, m)
                 throw nb::index_error("Array index out of range");
             return nb::cast(a.getitem((std::size_t) i));
         }, "a[i] -> float; a[i:j] -> a contiguous view sharing memory (step must be 1).")
-        .def("__setitem__", [](Array& a, Py_ssize_t i, double v) {
+        .def("__setitem__", [](Array& a, nb::object key, nb::object value) {
+            if (PySlice_Check(key.ptr())) {
+                Py_ssize_t start, stop, step;
+                if (PySlice_Unpack(key.ptr(), &start, &stop, &step) < 0)
+                    throw nb::python_error();
+                Py_ssize_t const n =
+                    PySlice_AdjustIndices((Py_ssize_t) a.size(), &start, &stop, step);
+                if (step != 1)
+                    throw nb::value_error(
+                        "hpxpy.Array supports only contiguous slice assignment (step == 1)");
+                if (nb::isinstance<Array>(value)) {          // a[i:j] = Array (copy in)
+                    Array const& rhs = nb::cast<Array&>(value);
+                    if (rhs.size() != (std::size_t) n)
+                        throw nb::value_error("slice assignment size mismatch");
+                    nb::gil_scoped_release r;
+                    a.assign_range((std::size_t) start, rhs);
+                } else {                                     // a[i:j] = scalar (fill)
+                    double v = nb::cast<double>(value);
+                    nb::gil_scoped_release r;
+                    a.fill_range((std::size_t) start, (std::size_t) n, v);
+                }
+                return;
+            }
+            Py_ssize_t i = PyNumber_AsSsize_t(key.ptr(), PyExc_IndexError);
+            if (i == -1 && PyErr_Occurred())
+                throw nb::python_error();
             Py_ssize_t const n = (Py_ssize_t) a.size();
             if (i < 0)
                 i += n;
             if (i < 0 || i >= n)
                 throw nb::index_error("Array index out of range");
-            a.setitem((std::size_t) i, v);
-        }, "a[i] = value (write a single element).")
+            a.setitem((std::size_t) i, nb::cast<double>(value));
+        }, "a[i] = value; a[i:j] = scalar (fill) or Array (copy, contiguous step 1).")
         .def("to_numpy", &to_numpy_view,
              "Zero-copy NumPy view (writable; shares memory with the Array).")
         .def("__array__", [](nb::object self, nb::args, nb::kwargs) {

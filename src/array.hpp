@@ -66,6 +66,20 @@ public:
     double getitem(std::size_t i) const { return base_[i]; }
     void setitem(std::size_t i, double v) { base_[i] = v; }
 
+    // Slice assignment a[start:start+n] = ... (contiguous; binding computes start/n).
+    // fill_range broadcasts a scalar; assign_range copies an Array of length n in.
+    void fill_range(std::size_t start, std::size_t n, double v)
+    {
+        if (n)
+            hpx::fill(hpx::execution::par, base_ + start, base_ + start + n, v);
+    }
+    void assign_range(std::size_t start, Array const& rhs)
+    {
+        if (rhs.size_)
+            hpx::copy(hpx::execution::par, rhs.base_, rhs.base_ + rhs.size_,
+                base_ + start);
+    }
+
     // Contiguous view [start, start+n) sharing this array's buffer (numpy a[i:j]).
     Array view(std::size_t start, std::size_t n) const
     {
