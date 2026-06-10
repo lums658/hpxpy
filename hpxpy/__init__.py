@@ -25,11 +25,19 @@ __version__ = "0.0.1"
 _initialized = False
 
 
-def init(num_threads: int | None = None) -> None:
-    """Start the HPX runtime. ``num_threads=None`` uses all cores. Idempotent."""
+def init(num_threads: int | None = None, hpx_args: list[str] | None = None) -> None:
+    """Start the HPX runtime. ``num_threads=None`` uses all cores. Idempotent.
+
+    ``hpx_args`` are raw HPX command-line flags appended to the runtime's argv —
+    used for a distributed launch, e.g.
+    ``["--hpx:localities=2", "--hpx:agas=host:7910", "--hpx:hpx=host:7910"]`` on the
+    console and the same plus ``"--hpx:worker"`` (and its own ``--hpx:hpx`` port) on a
+    worker. Under Slurm/``srun`` HPX auto-detects the layout, so ``hpx_args`` can be empty.
+    """
     global _initialized
     if not _initialized:
-        _core.init_runtime(int(num_threads) if num_threads else 0)
+        _core.init_runtime(int(num_threads) if num_threads else 0,
+                           list(hpx_args) if hpx_args else [])
         _initialized = True
 
 
@@ -42,6 +50,40 @@ def finalize() -> None:
 
 
 atexit.register(finalize)
+
+
+def num_localities() -> int:
+    """Number of HPX localities (processes) in the running runtime (1 if single-node)."""
+    return _core.num_localities()
+
+
+def locality_id() -> int:
+    """This locality's id (0 on the console locality)."""
+    return _core.locality_id()
+
+
+#: Alias for :func:`locality_id` (this locality's id).
+here = locality_id
+
+
+def is_console() -> bool:
+    """True on the console locality (the one that runs the user program)."""
+    return _core.is_console()
+
+
+def is_worker() -> bool:
+    """True if this process was started as a ``--hpx:worker`` locality."""
+    return _core.is_worker()
+
+
+def distributed_sum(local: float) -> float:
+    """All-reduce(sum) of a scalar across localities (every locality must call it).
+
+    Returns ``local`` unchanged when there is a single locality. A cross-locality
+    smoke primitive for M4; the global-view distributed :class:`Array` (segmented
+    reductions over a partitioned vector) is the next milestone.
+    """
+    return _core.distributed_sum(float(local))
 
 
 def sum(a: Array) -> float:  # noqa: A001 - NumPy-style namespace
@@ -183,5 +225,11 @@ __all__ = [
     "to_numpy",
     "num_worker_threads",
     "hpx_version",
+    "num_localities",
+    "locality_id",
+    "here",
+    "is_console",
+    "is_worker",
+    "distributed_sum",
     "__version__",
 ]
