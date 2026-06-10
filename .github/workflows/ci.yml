@@ -32,3 +32,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build + test (local == CI gate)
         run: bash scripts/check.sh
+
+  build-test-distributed:
+    # Only trusted events on the self-hosted Rostam runner (no fork code).
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, rostam]
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build editable install
+        run: |
+          source env.sh >/dev/null
+          unset LD_PRELOAD
+          "$PY" -m pip install -e ".[test]" --no-cache-dir \
+            -C cmake.define.CMAKE_CXX_COMPILER=/opt/apps/gcc/15.1.0/bin/g++ \
+            -C cmake.define.CMAKE_PREFIX_PATH="$HPX_ROOT" \
+            -C cmake.define.HPX_DIR="$HPX_DIR"
+      - name: 2-locality distributed smoke test
+        run: source env.sh >/dev/null && LD_PRELOAD="$HPXPY_TCMALLOC" "$PY" -m pytest -m distributed tests/test_distributed.py

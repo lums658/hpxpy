@@ -34,8 +34,11 @@ wheel.packages = ["hpxpy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not distributed'"
 pythonpath = ["."]          # so tests can import the benchmarks package
+markers = [
+    "distributed: multi-locality tests that spawn 2 HPX processes (excluded from the default run)",
+]
 
 [tool.coverage.run]
 source = ["hpxpy", "benchmarks"]

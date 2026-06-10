@@ -14,6 +14,8 @@
 #include <hpx/numeric.hpp>
 #include <hpx/execution.hpp>
 #include <hpx/version.hpp>
+#include <hpx/runtime_distributed.hpp>        // get_num_localities / get_locality_id
+#include <hpx/collectives/all_reduce.hpp>     // distributed_sum (cross-locality collective)
 
 #include "array.hpp"
 #include "sparse.hpp"
@@ -25,11 +27,14 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -38,8 +43,15 @@ using namespace nb::literals;
 
 // ---------------------------------------------------------------------------
 // Managed HPX runtime (started on a background thread; the Python main thread
-// is not an HPX thread). Pattern adapted from HPyX's global_runtime_manager so
-// the two projects stay runtime-compatible for the eventual merge.
+// is not an HPX thread). hpx::start launches the runtime and returns; Python
+// drives the work from the foreign main thread.
+//
+// Multi-locality: HPX runs the entry function (hpx_main) only on the CONSOLE
+// locality. The console uses it as its readiness handshake; a WORKER locality
+// (launched with --hpx:worker) never runs hpx_main, so it instead gates on HPX's
+// own hpx::is_running() signal. Shutdown stays collective — the console's
+// finalize broadcasts to all localities, and a worker's hpx::stop() (in the dtor)
+// returns once that broadcast arrives.
 //
 // Thread count is passed via the command line "--hpx:threads=N" — the cfg key
 // "hpx.os_threads" was found NOT to limit the pool in practice (M0 lesson from
@@ -49,13 +61,21 @@ namespace {
 
 struct runtime_manager
 {
-    explicit runtime_manager(int num_threads) : running_(false), rts_(nullptr)
+    explicit runtime_manager(int num_threads, std::vector<std::string> const& hpx_args)
+      : running_(false), rts_(nullptr), is_worker_(false)
     {
         argv_storage_.emplace_back("hpxpy");
         if (num_threads > 0)
             argv_storage_.emplace_back("--hpx:threads=" + std::to_string(num_threads));
         // Avoid mmap thread-stack exhaustion (max_map_count) at high thread counts.
         argv_storage_.emplace_back("--hpx:ini=hpx.stacks.use_guard_pages=0");
+        // Extra HPX flags (e.g. distributed: --hpx:localities/--hpx:agas/--hpx:hpx/--hpx:worker).
+        for (auto const& a : hpx_args)
+        {
+            argv_storage_.emplace_back(a);
+            if (a == "--hpx:worker")
+                is_worker_ = true;
+        }
         for (auto& s : argv_storage_) argv_.push_back(s.data());
 
         hpx::init_params params;
@@ -65,8 +85,22 @@ struct runtime_manager
         if (!hpx::start(start_fn, static_cast<int>(argv_.size()), argv_.data(), params))
             std::abort();  // runtime failed to start
 
-        std::unique_lock<std::mutex> lk(startup_mtx_);
-        while (!running_) startup_cond_.wait(lk);
+        if (is_worker_)
+        {
+            // hpx_main runs only on the console; gate on HPX's own readiness signal.
+            for (int i = 0; !hpx::is_running(); ++i)
+            {
+                if (i > 30000)
+                    throw std::runtime_error(
+                        "HPX worker runtime did not reach running state");
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        else
+        {
+            std::unique_lock<std::mutex> lk(startup_mtx_);
+            while (!running_) startup_cond_.wait(lk);
+        }
     }
 
     ~runtime_manager()
@@ -85,12 +119,15 @@ struct runtime_manager
         return hpx::finalize();
     }
 
+    bool is_worker() const { return is_worker_; }
+
 private:
     hpx::spinlock mtx_;
     hpx::condition_variable_any cond_;
     std::mutex startup_mtx_;
     std::condition_variable startup_cond_;
     bool running_;
+    bool is_worker_;
     hpx::runtime* rts_;
     std::vector<std::string> argv_storage_;
     std::vector<char*> argv_;
@@ -98,12 +135,12 @@ private:
 
 runtime_manager* g_rts = nullptr;
 
-void init_runtime(int num_threads)
+void init_runtime(int num_threads, std::vector<std::string> hpx_args)
 {
     if (g_rts == nullptr)
     {
         nb::gil_scoped_acquire acquire;
-        g_rts = new runtime_manager(num_threads);
+        g_rts = new runtime_manager(num_threads, hpx_args);
     }
 }
 
@@ -154,10 +191,42 @@ NB_MODULE(_core, m)
 {
     m.doc() = "hpxpy._core — managed HPX runtime + the Array type and HPX reductions";
     m.def("init_runtime", &init_runtime, "num_threads"_a = 0,
-          "Start the HPX runtime (num_threads<=0 => all cores).");
+          "hpx_args"_a = std::vector<std::string>{},
+          "Start the HPX runtime (num_threads<=0 => all cores). hpx_args are raw HPX "
+          "CLI flags appended to argv (e.g. distributed --hpx:localities/agas/hpx/worker).");
     m.def("finalize_runtime", &finalize_runtime, "Stop the HPX runtime.");
     m.def("num_worker_threads", []() { return hpx::get_num_worker_threads(); });
     m.def("hpx_version", []() { return hpx::complete_version(); });
+
+    // Distributed introspection + a cross-locality collective (M4). num_localities/
+    // locality_id are quick runtime queries; distributed_sum blocks on a collective so
+    // it releases the GIL and runs on an HPX thread (collectives suspend).
+    m.def("num_localities", []() {
+        return static_cast<int>(hpx::get_num_localities(hpx::launch::sync));
+    }, "Number of localities in the running HPX runtime.");
+    m.def("locality_id", []() {
+        return static_cast<int>(hpx::get_locality_id());
+    }, "This locality's id (0 = console).");
+    m.def("is_worker", []() {
+        return g_rts != nullptr && g_rts->is_worker();
+    }, "True if this process was started as a --hpx:worker locality.");
+    m.def("is_console", []() {
+        return !(g_rts != nullptr && g_rts->is_worker());
+    }, "True on the console locality (the one that runs the user program).");
+    m.def("distributed_sum", [](double local) -> double {
+        nb::gil_scoped_release release;
+        std::uint32_t n = hpx::get_num_localities(hpx::launch::sync);
+        if (n <= 1)
+            return local;    // single locality: collective is the identity
+        std::uint32_t site = hpx::get_locality_id();
+        // Collectives suspend, so run on an HPX thread; every site must participate.
+        return hpx::async([=]() {
+            return hpx::collectives::all_reduce(
+                "hpxpy_distributed_sum", local, std::plus<double>{},
+                hpx::collectives::num_sites_arg(n),
+                hpx::collectives::this_site_arg(site)).get();
+        }).get();
+    }, "local"_a, "All-reduce(sum) of a scalar across localities (every site must call).");
 
     // Reductions release the GIL around the HPX work (the wrapper itself is
     // GIL-agnostic). std::invalid_argument from min()/max() maps to ValueError.
