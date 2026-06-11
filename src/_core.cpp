@@ -427,36 +427,135 @@ NB_MODULE(_core, m)
         // Indexing: a[i] -> float, a[i:j] -> contiguous VIEW (shares memory).
         // a[i:j:k] with k != 1 -> strided VIEW (shares memory, no copy).
         // a[i,j,...] (tuple of ints, len==ndim) -> multi-index scalar get (N-D).
-        // a[i:j,...] (tuple with a slice) -> NotImplementedError (stage 6).
+        // a[i:j, ::k, m, ...] (tuple with a slice, Ellipsis, int) -> N-D VIEW (stage 6).
         // Index/bounds normalization (numpy semantics) lives here; the wrapper is raw.
         .def("__getitem__", [](Array const& a, nb::object key) -> nb::object {
-            // Tuple key: multi-index (all ints) or N-D slice (deferred).
+            // Tuple key: multi-index (all ints) or N-D slice (real, stage 6).
+            // Supports int / slice / Ellipsis specifiers per axis; one Ellipsis
+            // expands to full slices; missing trailing axes get full slices.
             if (PyTuple_Check(key.ptr())) {
-                Py_ssize_t tlen = PyTuple_GET_SIZE(key.ptr());
-                // Check if any element is a slice -> deferred stage 6
+                Py_ssize_t const tlen = PyTuple_GET_SIZE(key.ptr());
+                std::size_t const ndim = a.ndim();
+
+                // Count non-Ellipsis specifiers; at most one Ellipsis allowed.
+                Py_ssize_t n_non_ellipsis = 0;
+                Py_ssize_t ellipsis_pos = -1;
                 for (Py_ssize_t k = 0; k < tlen; ++k) {
-                    if (PySlice_Check(PyTuple_GET_ITEM(key.ptr(), k)))
-                        throw nb::type_error(
-                            "N-D slice indexing is not yet implemented (stage 6); "
-                            "use integer multi-index a[i, j, ...] for scalar access.");
+                    PyObject* item = PyTuple_GET_ITEM(key.ptr(), k);
+                    if (item == Py_Ellipsis) {
+                        if (ellipsis_pos != -1)
+                            throw nb::index_error(
+                                "an index can only have a single ellipsis ('...')");
+                        ellipsis_pos = k;
+                    } else {
+                        ++n_non_ellipsis;
+                    }
                 }
-                // All-integer tuple: multi-index scalar get
-                if (tlen != (Py_ssize_t) a.ndim())
-                    throw nb::index_error("index tuple length must equal ndim");
-                std::vector<std::size_t> idx(tlen);
+                if ((std::size_t) n_non_ellipsis > ndim)
+                    throw nb::index_error(
+                        "too many indices for array");
+
+                // Build the per-axis spec list, expanding Ellipsis / padding.
+                std::vector<Array::AxisSpec> specs;
+                specs.reserve(ndim);
+                bool all_int = true;
+                std::size_t ax = 0;    // current input axis
+                auto handle_specifier = [&](PyObject* item) {
+                    Py_ssize_t dim = (Py_ssize_t) a.shape()[ax];
+                    if (PySlice_Check(item)) {
+                        all_int = false;
+                        Py_ssize_t start, stop, step;
+                        if (PySlice_Unpack(item, &start, &stop, &step) < 0)
+                            throw nb::python_error();
+                        Py_ssize_t slen =
+                            PySlice_AdjustIndices(dim, &start, &stop, step);
+                        Array::AxisSpec s;
+                        s.kind = Array::AxisSpec::SLICE;
+                        s.start = (std::ptrdiff_t) start;
+                        s.step = (std::ptrdiff_t) step;
+                        s.slicelen = (std::size_t) slen;
+                        specs.push_back(s);
+                    } else {
+                        Py_ssize_t ix =
+                            PyNumber_AsSsize_t(item, PyExc_IndexError);
+                        if (ix == -1 && PyErr_Occurred()) throw nb::python_error();
+                        if (ix < 0) ix += dim;
+                        if (ix < 0 || ix >= dim)
+                            throw nb::index_error("Array index out of range");
+                        Array::AxisSpec s;
+                        s.kind = Array::AxisSpec::INT;
+                        s.int_idx = (std::ptrdiff_t) ix;
+                        specs.push_back(s);
+                    }
+                    ++ax;
+                };
                 for (Py_ssize_t k = 0; k < tlen; ++k) {
-                    Py_ssize_t ix = PyNumber_AsSsize_t(
-                        PyTuple_GET_ITEM(key.ptr(), k), PyExc_IndexError);
-                    if (ix == -1 && PyErr_Occurred()) throw nb::python_error();
-                    Py_ssize_t dim = (Py_ssize_t) a.shape()[k];
-                    if (ix < 0) ix += dim;
-                    if (ix < 0 || ix >= dim)
-                        throw nb::index_error("Array index out of range");
-                    idx[k] = (std::size_t) ix;
+                    PyObject* item = PyTuple_GET_ITEM(key.ptr(), k);
+                    if (item == Py_Ellipsis) {
+                        // Expand to (ndim - n_non_ellipsis) full slices.
+                        std::size_t fill = ndim - (std::size_t) n_non_ellipsis;
+                        for (std::size_t f = 0; f < fill; ++f) {
+                            all_int = false;
+                            Array::AxisSpec s;
+                            s.kind = Array::AxisSpec::SLICE;
+                            s.start = 0;
+                            s.step = 1;
+                            s.slicelen = a.shape()[ax];
+                            specs.push_back(s);
+                            ++ax;
+                        }
+                    } else {
+                        handle_specifier(item);
+                    }
                 }
-                return nb::cast(a.getitem(idx));
+                // No ellipsis & fewer specifiers than ndim: pad trailing full slices.
+                while (ax < ndim) {
+                    all_int = false;
+                    Array::AxisSpec s;
+                    s.kind = Array::AxisSpec::SLICE;
+                    s.start = 0;
+                    s.step = 1;
+                    s.slicelen = a.shape()[ax];
+                    specs.push_back(s);
+                    ++ax;
+                }
+
+                // All-int, full rank -> scalar multi-index (unchanged fast path).
+                if (all_int && specs.size() == ndim) {
+                    std::vector<std::size_t> idx(ndim);
+                    for (std::size_t k = 0; k < ndim; ++k)
+                        idx[k] = (std::size_t) specs[k].int_idx;
+                    return nb::cast(a.getitem(idx));
+                }
+                return nb::cast(a.slice_nd(specs));
             }
             if (PySlice_Check(key.ptr())) {
+                // N-D array, plain slice: a[1:3] == a[1:3, :, ...] (implicit
+                // trailing full slices). Route through slice_nd.
+                if (a.ndim() > 1) {
+                    std::vector<Array::AxisSpec> specs;
+                    specs.reserve(a.ndim());
+                    Py_ssize_t start, stop, step;
+                    if (PySlice_Unpack(key.ptr(), &start, &stop, &step) < 0)
+                        throw nb::python_error();
+                    Py_ssize_t slen = PySlice_AdjustIndices(
+                        (Py_ssize_t) a.shape()[0], &start, &stop, step);
+                    Array::AxisSpec s0;
+                    s0.kind = Array::AxisSpec::SLICE;
+                    s0.start = (std::ptrdiff_t) start;
+                    s0.step = (std::ptrdiff_t) step;
+                    s0.slicelen = (std::size_t) slen;
+                    specs.push_back(s0);
+                    for (std::size_t ax = 1; ax < a.ndim(); ++ax) {
+                        Array::AxisSpec s;
+                        s.kind = Array::AxisSpec::SLICE;
+                        s.start = 0;
+                        s.step = 1;
+                        s.slicelen = a.shape()[ax];
+                        specs.push_back(s);
+                    }
+                    return nb::cast(a.slice_nd(specs));
+                }
                 Py_ssize_t start, stop, step;
                 if (PySlice_Unpack(key.ptr(), &start, &stop, &step) < 0)
                     throw nb::python_error();
@@ -469,6 +568,20 @@ NB_MODULE(_core, m)
                                                (std::size_t) n,
                                                (std::ptrdiff_t) step));
             }
+            // Bare Ellipsis: a[...] -> full view of all axes (numpy semantics).
+            if (key.ptr() == Py_Ellipsis) {
+                std::vector<Array::AxisSpec> specs;
+                specs.reserve(a.ndim());
+                for (std::size_t ax = 0; ax < a.ndim(); ++ax) {
+                    Array::AxisSpec s;
+                    s.kind = Array::AxisSpec::SLICE;
+                    s.start = 0;
+                    s.step = 1;
+                    s.slicelen = a.shape()[ax];
+                    specs.push_back(s);
+                }
+                return nb::cast(a.slice_nd(specs));
+            }
             Py_ssize_t i = PyNumber_AsSsize_t(key.ptr(), PyExc_IndexError);
             if (i == -1 && PyErr_Occurred())
                 throw nb::python_error();
@@ -479,7 +592,8 @@ NB_MODULE(_core, m)
                 throw nb::index_error("Array index out of range");
             return nb::cast(a.getitem((std::size_t) i));
         }, "a[i] -> float; a[i:j] -> contiguous view; a[i:j:k] -> strided view (zero-copy); "
-           "a[i,j,...] (tuple of ints, len==ndim) -> scalar (N-D multi-index).")
+           "a[i,j,...] (tuple of ints, len==ndim) -> scalar (N-D multi-index); "
+           "a[i:j, ::k, m, ...] (tuple with slice/Ellipsis) -> N-D view (zero-copy).")
         .def("__setitem__", [](Array& a, nb::object key, nb::object value) {
             // Tuple key: multi-index set (all ints) or N-D slice (deferred).
             if (PyTuple_Check(key.ptr())) {
