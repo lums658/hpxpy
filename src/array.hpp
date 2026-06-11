@@ -59,7 +59,17 @@ using dvec = hpx::compute::vector<double, numa_alloc>;
 //   coord_k = (i / aux[k]) % shape[k]  (integer div/mod with the inner volume)
 //   off += coord_k * strides[k]
 // The 1-D degenerate case (aux[0]=1) gives i*strides[0], matching the old branch.
+//
+// BcastView: a lightweight broadcast view of an operand used in binary().
+// strides may contain zeros (stride-0 trick: repeats the element along that axis).
 // ---------------------------------------------------------------------------
+
+struct BcastView {
+    double* base;
+    std::vector<std::size_t> shape;
+    std::vector<std::ptrdiff_t> strides;
+};
+
 inline std::vector<std::size_t> inner_volumes(std::vector<std::size_t> const& shape)
 {
     std::size_t nd = shape.size();
@@ -848,42 +858,114 @@ private:
         return out;
     }
 
+    // broadcast_shapes: right-align shapes sa and sb (treat missing leading axes as 1);
+    // per axis: equal => that size; one is 1 => the other; else throw.
+    static std::vector<std::size_t> broadcast_shapes(
+        std::vector<std::size_t> const& sa,
+        std::vector<std::size_t> const& sb)
+    {
+        std::size_t ra = sa.size();
+        std::size_t rb = sb.size();
+        std::size_t rr = ra > rb ? ra : rb;
+        std::vector<std::size_t> result(rr);
+        for (std::size_t k = 0; k < rr; ++k) {
+            // right-align: axis k from the end is index (rr-1-k) from the back
+            std::size_t ak = (k < rr - ra) ? std::size_t(0) : ra - (rr - k);
+            std::size_t bk = (k < rr - rb) ? std::size_t(0) : rb - (rr - k);
+            std::size_t da = (k < rr - ra) ? std::size_t(1) : sa[ak];
+            std::size_t db = (k < rr - rb) ? std::size_t(1) : sb[bk];
+            if (da == db) {
+                result[k] = da;
+            } else if (da == 1) {
+                result[k] = db;
+            } else if (db == 1) {
+                result[k] = da;
+            } else {
+                // Build numpy-style error message: "(a,b,..) (c,..)"
+                std::string msg = "operands could not be broadcast together with shapes (";
+                for (std::size_t i = 0; i < ra; ++i) {
+                    if (i) msg += ",";
+                    msg += std::to_string(sa[i]);
+                }
+                msg += ") (";
+                for (std::size_t i = 0; i < rb; ++i) {
+                    if (i) msg += ",";
+                    msg += std::to_string(sb[i]);
+                }
+                msg += ")";
+                throw std::invalid_argument(msg);
+            }
+        }
+        return result;
+    }
+
+    // Build a BcastView of operand x aligned to rshape (rank rr).
+    // Axes that are absent (left-padded) or size-1 in x but >1 in rshape get stride 0.
+    static BcastView make_bcast_view(Array const& x,
+        std::vector<std::size_t> const& rshape)
+    {
+        std::size_t rr = rshape.size();
+        std::size_t rx = x.shape_.size();
+        BcastView v;
+        v.base = x.base_;
+        v.shape = rshape;
+        v.strides.resize(rr, 0);
+        for (std::size_t k = 0; k < rr; ++k) {
+            if (k < rr - rx) {
+                // leading padded axis: stride 0
+                v.strides[k] = 0;
+            } else {
+                std::size_t xk = rx - (rr - k);   // corresponding axis in x
+                if (x.shape_[xk] == 1 && rshape[k] > 1)
+                    v.strides[k] = 0;              // broadcast axis: stride 0
+                else
+                    v.strides[k] = x.strides_[xk];
+            }
+        }
+        return v;
+    }
+
     template <typename Op>
     Array binary(Array const& o, Op op) const
     {
-        // For N-D arrays require matching shape (no broadcasting in stage 3).
-        if (shape_.size() > 1 || o.shape_.size() > 1) {
-            if (shape_ != o.shape_)
-                throw std::invalid_argument(
-                    "element-wise op: shape mismatch (broadcasting not supported until stage 4)");
-        } else {
-            if (size_ != o.size_)
-                throw std::invalid_argument("element-wise op: size mismatch");
-        }
-        Array r;
-        r.alloc_nd_(shape_, size_, 0.0);
-        if (size_) {
-            if (is_contiguous() && o.is_contiguous()) {
+        // ---- FAST PATH (zero-penalty): same shape, both contiguous ----
+        if (shape_ == o.shape_ && is_contiguous() && o.is_contiguous()) {
+            Array r;
+            r.alloc_nd_(shape_, size_, 0.0);
+            if (size_)
                 hpx::transform(
                     hpx::execution::par, base_, base_ + size_, o.base_, r.base_, op);
-            } else {
-                double* ba = base_;
-                double* bb = o.base_;
-                double* dst = r.base_;
-                auto auxa = inner_volumes(shape_);
-                auto auxb = inner_volumes(o.shape_);
-                auto const& sha = shape_;
-                auto const& sta = strides_;
-                auto const& shb = o.shape_;
-                auto const& stb = o.strides_;
-                hpx::experimental::for_loop(hpx::execution::par,
-                    std::size_t(0), size_,
-                    [ba, bb, dst, &sha, &sta, &auxa, &shb, &stb, &auxb, op](std::size_t i) {
-                        dst[i] = op(ba[flat_to_offset(i, sha, sta, auxa)],
-                                    bb[flat_to_offset(i, shb, stb, auxb)]);
-                    });
-            }
+            return r;
         }
+
+        // ---- Compute result shape (broadcast or same-shape) ----
+        std::vector<std::size_t> rshape =
+            (shape_ == o.shape_) ? shape_ : broadcast_shapes(shape_, o.shape_);
+        std::size_t rsize = 1;
+        for (auto d : rshape) rsize *= d;
+
+        Array r;
+        r.alloc_nd_(rshape, rsize, 0.0);
+        if (rsize == 0)
+            return r;
+
+        // Build broadcast views of *this and o aligned to rshape.
+        BcastView va = make_bcast_view(*this, rshape);
+        BcastView vb = make_bcast_view(o, rshape);
+        double* ba = va.base;
+        double* bb = vb.base;
+        double* dst = r.base_;
+        auto aux = inner_volumes(rshape);
+        auto sha = va.shape;
+        auto sta = va.strides;
+        auto shb = vb.shape;
+        auto stb = vb.strides;
+        hpx::experimental::for_loop(hpx::execution::par,
+            std::size_t(0), rsize,
+            [ba, bb, dst, sha, sta, shb, stb, aux, op](std::size_t i) {
+                dst[i] = op(ba[flat_to_offset(i, sha, sta, aux)],
+                            bb[flat_to_offset(i, shb, stb, aux)]);
+            });
         return r;
     }
 
