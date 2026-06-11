@@ -213,6 +213,29 @@ def arange(n: int) -> Array:
     return _core.arange(int(n))
 
 
+def transpose(a: Array, axes=None) -> Array:
+    """Permute axes of ``a`` (``None`` or empty reverses all axes). Zero-copy view."""
+    return a.transpose(axes)
+
+
+def reshape(a: Array, shape) -> Array:
+    """Reshape ``a`` to ``shape`` (int or tuple; one -1 is inferred).
+
+    Returns a zero-copy view when ``a`` is contiguous, otherwise a copy.
+    """
+    return a.reshape(shape)
+
+
+def squeeze(a: Array, axis=None) -> Array:
+    """Remove size-1 dimensions (all if ``axis=None``, else the named axis/axes)."""
+    return a.squeeze(axis)
+
+
+def expand_dims(a: Array, axis: int) -> Array:
+    """Insert a size-1 dimension at position ``axis``."""
+    return a.expand_dims(int(axis))
+
+
 def num_worker_threads() -> int:
     """Number of HPX worker threads in the running runtime."""
     return _core.num_worker_threads()
@@ -237,6 +260,10 @@ __all__ = [
     "dot",
     "sort",
     "cumsum",
+    "transpose",
+    "reshape",
+    "squeeze",
+    "expand_dims",
     "CsrMatrix",
     "csr_from",
     "laplacian_1d",
