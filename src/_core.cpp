@@ -165,29 +165,31 @@ using hpxpy::Array;
 
 // NumPy bridge types: a 1-D float64 C-contiguous input (writable, so a borrow can
 // share mutations both ways), and a 1-D float64 output view.
-using np_rw = nb::ndarray<nb::numpy, double, nb::c_contig, nb::ndim<1>>;
-using np_out = nb::ndarray<nb::numpy, double, nb::ndim<1>>;
+using np_rw = nb::ndarray<nb::numpy, double, nb::c_contig>;   // any rank, C-contiguous in
+using np_out = nb::ndarray<nb::numpy, double>;                // any rank out (dynamic)
 
 // Zero-copy NumPy view of an Array. `obj` (the Array Python object) is the ndarray's
 // owner, so the HPX buffer outlives the view. Writable; works for slice views too.
 // For strided views (stride != 1) the DLPack element stride is passed so numpy sees
 // the correct view without a copy. Negative strides (reverse views) are also passed
 // through — numpy supports them as long as base_ points to the first logical element.
+// Zero-copy NumPy view of an Array, any rank. `obj` (the Array Python object) owns the
+// ndarray, so the HPX buffer outlives the view. Contiguous arrays pass nullptr strides
+// (nanobind infers row-major); non-contiguous ones (a[::2], a[::-1], transposed views)
+// pass explicit strides. NOTE: nanobind's typed ndarray takes strides in ELEMENTS (it
+// multiplies by sizeof(T) internally) — passing bytes segfaults on negative strides.
 np_out to_numpy_view(nb::object obj)
 {
     Array& a = nb::cast<Array&>(obj);
-    // The 1-D bridge can't describe a higher-rank shape; rather than hand NumPy a
-    // silently-wrong flat view, refuse until the rank-dynamic bridge lands (N-D stage 2).
-    if (a.ndim() > 1)
-        throw nb::type_error(
-            "to_numpy()/__array__ is 1-D only for now; the N-D NumPy bridge lands next.");
-    std::ptrdiff_t s = a.stride();
-    if (s == 1) {
-        return np_out(a.mutable_data(), {a.size()}, obj);
+    std::size_t nd = a.ndim();
+    std::vector<std::size_t> shape(nd);
+    std::vector<int64_t> strides(nd);
+    for (std::size_t k = 0; k < nd; ++k) {
+        shape[k] = a.shape()[k];
+        strides[k] = static_cast<int64_t>(a.strides()[k]);   // ELEMENTS, not bytes
     }
-    // Pass the element stride so numpy sees a strided (possibly negative-stride) view.
-    return np_out(a.mutable_data(), {a.size()}, obj,
-                  {static_cast<int64_t>(s)});
+    return np_out(a.mutable_data(), nd, shape.data(), obj,
+                  a.is_contiguous() ? nullptr : strides.data());
 }
 
 }  // namespace
@@ -534,13 +536,17 @@ NB_MODULE(_core, m)
     m.def("to_numpy", &to_numpy_view, "a"_a,
           "Zero-copy NumPy view of an Array (writable; shares memory).");
     m.def("from_numpy", [](np_rw arr, bool copy) -> Array {
-        std::size_t const n = arr.shape(0);
+        std::size_t const nd = arr.ndim();
+        std::vector<std::size_t> shape(nd);
+        for (std::size_t k = 0; k < nd; ++k)
+            shape[k] = arr.shape(k);
+        std::size_t const total = arr.size();    // product of all axes
         double* p = arr.data();
         if (copy) {
-            Array a(n, 0.0);    // NUMA-aware; correct first-touch for HPX ops
-            if (n) {
+            Array a(shape, 0.0);    // NUMA-aware N-D; correct first-touch for HPX ops
+            if (total) {
                 nb::gil_scoped_release release;
-                hpx::copy(hpx::execution::par, p, p + n, a.mutable_data());
+                hpx::copy(hpx::execution::par, p, p + total, a.mutable_data());
             }
             return a;
         }
@@ -551,12 +557,12 @@ NB_MODULE(_core, m)
             nb::gil_scoped_acquire g;
             delete static_cast<np_rw*>(q);
         });
-        return Array::borrow(p, n, std::move(keep));
+        return Array::borrow_nd(p, std::move(shape), std::move(keep));
     }, nb::arg("a").noconvert(), "copy"_a = true,
-       "Bring a 1-D float64 C-contiguous NumPy array into hpxpy. copy=True (default) "
-       "copies into a NUMA-aware Array; copy=False borrows it (zero-copy, shares "
-       "memory both ways, but numa-naive). Non-float64/non-contiguous input raises "
-       "(never a silent copy/cast).");
+       "Bring a float64 C-contiguous NumPy array (any rank) into hpxpy. copy=True "
+       "(default) copies into a NUMA-aware Array; copy=False borrows it (zero-copy, "
+       "shares memory both ways, but numa-naive). Non-float64/non-contiguous input "
+       "raises (never a silent copy/cast).");
 
     // --- Sparse (CSR) matrix + SpMV (M5a) ---------------------------------
     nb::class_<hpxpy::CsrMatrix>(m, "CsrMatrix")

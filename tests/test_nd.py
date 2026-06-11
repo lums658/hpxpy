@@ -331,12 +331,3 @@ def test_2d_max():
 def test_3d_sum():
     a = hpx.ones((2, 3, 4))
     assert a.sum() == pytest.approx(24.0, rel=1e-14)
-
-
-def test_to_numpy_nd_raises():
-    """N-D to_numpy/__array__ refuses (no silent flat view) until the bridge lands (stage 2)."""
-    a = hpx.zeros((2, 3))
-    with pytest.raises(TypeError):
-        a.to_numpy()
-    with pytest.raises(TypeError):
-        hpx.to_numpy(a)

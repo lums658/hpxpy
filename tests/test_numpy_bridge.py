@@ -85,3 +85,54 @@ def test_from_numpy_rejects_float32():
 def test_from_numpy_rejects_noncontiguous():
     with pytest.raises(TypeError):
         hpx.from_numpy(np.arange(20, dtype=np.float64)[::2])
+
+
+# --- N-D bridge (stage 2: rank-dynamic to_numpy / from_numpy) ----------------
+
+def test_to_numpy_2d_view():
+    a = hpx.zeros((3, 4))
+    a[1, 2] = 5.0
+    v = np.asarray(a)
+    assert v.shape == (3, 4) and v.dtype == np.float64
+    assert v[1, 2] == 5.0          # byte strides correct -> value at right index
+    assert v.sum() == 5.0
+    v[0, 0] = 9.0                  # shared buffer
+    assert a[0, 0] == 9.0
+
+
+def test_to_numpy_3d_view_values():
+    a = hpx.zeros((2, 3, 4))
+    a[1, 2, 3] = 7.0
+    v = a.to_numpy()
+    assert v.shape == (2, 3, 4)
+    assert v[1, 2, 3] == 7.0
+    assert v.sum() == 7.0
+
+
+def test_from_numpy_2d_copy_roundtrip():
+    npx = np.arange(12, dtype=np.float64).reshape(3, 4)
+    a = hpx.from_numpy(npx)                       # copy
+    assert a.shape == (3, 4) and a.ndim == 2
+    np.testing.assert_array_equal(np.asarray(a), npx)
+    assert a[2, 3] == npx[2, 3]
+
+
+def test_from_numpy_3d_roundtrip():
+    npx = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
+    a = hpx.from_numpy(npx)
+    np.testing.assert_array_equal(np.asarray(a), npx)
+
+
+def test_from_numpy_2d_borrow_shares():
+    npx = np.arange(12, dtype=np.float64).reshape(3, 4)
+    a = hpx.from_numpy(npx, copy=False)           # borrow
+    npx[1, 1] = 50.0
+    assert a[1, 1] == 50.0
+    a[2, 0] = 60.0
+    assert npx[2, 0] == 60.0
+
+
+def test_from_numpy_2d_rejects_noncontiguous():
+    npx = np.arange(12, dtype=np.float64).reshape(3, 4)
+    with pytest.raises(TypeError):
+        hpx.from_numpy(npx.T)                      # transpose is non-C-contiguous
