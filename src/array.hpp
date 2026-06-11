@@ -183,6 +183,25 @@ public:
         return r;
     }
 
+    // N-D borrow: wrap an external C-contiguous N-D buffer (row-major). Computes
+    // row-major strides from shape; `keepalive` keeps the buffer alive (from_numpy).
+    static Array borrow_nd(double* p, std::vector<std::size_t> shape,
+        std::shared_ptr<void> keepalive)
+    {
+        Array r;
+        r.owner_ = std::move(keepalive);
+        r.base_ = p;
+        r.shape_ = std::move(shape);
+        std::size_t total = 1;
+        for (std::size_t d : r.shape_)
+            total *= d;
+        r.size_ = total;
+        r.strides_.assign(r.shape_.size(), 1);
+        for (std::size_t k = r.shape_.size(); k-- > 1;)
+            r.strides_[k - 1] = static_cast<std::ptrdiff_t>(r.shape_[k]) * r.strides_[k];
+        return r;
+    }
+
     // Reductions — thin wrappers over HPX algorithms, run in place on the buffer.
     // Contiguous path (is_contiguous()): raw pointer range passed to hpx::reduce.
     // Strided path: hpx::experimental::for_loop with reduction object, zero-copy.
