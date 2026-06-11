@@ -163,11 +163,80 @@ void finalize_runtime()
 // sites below), not inside the wrapper.
 // ---------------------------------------------------------------------------
 using hpxpy::Array;
+using hpxpy::DType;
 
-// NumPy bridge types: a 1-D float64 C-contiguous input (writable, so a borrow can
-// share mutations both ways), and a 1-D float64 output view.
-using np_rw = nb::ndarray<nb::numpy, double, nb::c_contig>;   // any rank, C-contiguous in
-using np_out = nb::ndarray<nb::numpy, double>;                // any rank out (dynamic)
+// NumPy bridge types: a runtime-dtype C-contiguous input (writable, so a borrow can
+// share mutations both ways), and a runtime-dtype output view. The element dtype is
+// carried at run time (read via arr.dtype() / passed to the output ctor) so ONE bridge
+// serves float64/float32/int64 with the no-silent-cast contract.
+using np_rw = nb::ndarray<nb::numpy, nb::c_contig>;   // any rank/dtype, C-contiguous in
+using np_out = nb::ndarray<nb::numpy>;                // any rank/dtype out (dynamic)
+
+// dlpack dtype tags for the three supported element types (runtime comparison).
+inline nb::dlpack::dtype nb_dtype_of(DType d)
+{
+    switch (d) {
+        case DType::F64: return nb::dtype<double>();
+        case DType::F32: return nb::dtype<float>();
+        case DType::I64: return nb::dtype<int64_t>();
+    }
+    return nb::dtype<double>();
+}
+
+// Map a runtime numpy/dlpack dtype to our DType, or throw (no silent cast). Only
+// float64/float32/int64 are supported; anything else (int32, float16, complex, ...)
+// is rejected with TypeError.
+DType dtype_from_nb(nb::dlpack::dtype dt)
+{
+    if (dt == nb::dtype<double>())  return DType::F64;
+    if (dt == nb::dtype<float>())   return DType::F32;
+    if (dt == nb::dtype<int64_t>()) return DType::I64;
+    throw nb::type_error(
+        "unsupported dtype: hpxpy supports float64, float32, and int64 only "
+        "(no silent cast)");
+}
+
+// parse_dtype(obj): accept numpy dtype objects, numpy scalar types, dtype strings
+// ('float32','f4','int64','i8', ...), and Python float->F64 / int->I64. Normalizes
+// via numpy.dtype(obj) then maps to {F64,F32,I64}; raises TypeError on anything else
+// (int32, float16, complex, bool, ...). None -> F64 (the default).
+DType parse_dtype(nb::object obj)
+{
+    if (obj.is_none())
+        return DType::F64;
+    // Python built-in scalar types map like numpy: float->float64, int->int64.
+    if (obj.is(reinterpret_cast<PyObject*>(&PyFloat_Type)))
+        return DType::F64;
+    if (obj.is(reinterpret_cast<PyObject*>(&PyLong_Type)))
+        return DType::I64;
+    nb::module_ np = nb::module_::import_("numpy");
+    nb::object npdt;
+    try {
+        npdt = np.attr("dtype")(obj);    // normalize anything numpy understands
+    } catch (nb::python_error&) {
+        throw nb::type_error("invalid dtype");
+    }
+    std::string name = nb::cast<std::string>(npdt.attr("name"));
+    if (name == "float64") return DType::F64;
+    if (name == "float32") return DType::F32;
+    if (name == "int64")   return DType::I64;
+    throw nb::type_error(
+        ("unsupported dtype '" + name +
+         "': hpxpy supports float64, float32, and int64 only").c_str());
+}
+
+// The numpy dtype OBJECT for a DType (so a.dtype == np.float32 works like numpy).
+nb::object numpy_dtype_object(DType d)
+{
+    nb::module_ np = nb::module_::import_("numpy");
+    const char* name = "float64";
+    switch (d) {
+        case DType::F64: name = "float64"; break;
+        case DType::F32: name = "float32"; break;
+        case DType::I64: name = "int64";   break;
+    }
+    return np.attr("dtype")(name);
+}
 
 // Zero-copy NumPy view of an Array. `obj` (the Array Python object) is the ndarray's
 // owner, so the HPX buffer outlives the view. Writable; works for slice views too.
@@ -226,8 +295,36 @@ np_out to_numpy_view(nb::object obj)
         shape[k] = a.shape()[k];
         strides[k] = static_cast<int64_t>(a.strides()[k]);   // ELEMENTS, not bytes
     }
-    return np_out(a.mutable_data(), nd, shape.data(), obj,
-                  a.is_contiguous() ? nullptr : strides.data());
+    // Runtime dtype: pass the matching dlpack dtype so numpy sees float64/float32/
+    // int64 correctly. Strides stay in ELEMENTS (nanobind scales by itemsize).
+    return np_out(a.raw_data(), nd, shape.data(), obj,
+                  a.is_contiguous() ? nullptr : strides.data(),
+                  nb_dtype_of(a.dtype()));
+}
+
+// Scalar element read at logical ELEMENT offset `off` (already includes strides),
+// dispatched on the array's dtype: int64 -> Python int, float -> Python float.
+nb::object getitem_at(Array const& a, std::ptrdiff_t off)
+{
+    return hpxpy::dispatch_dtype(a.dtype(), [&](auto tag) -> nb::object {
+        using T = decltype(tag);
+        T v = a.template data_as<T>()[off];
+        return nb::cast(v);
+    });
+}
+
+// Scalar element write at logical ELEMENT offset `off`, casting the Python value to
+// the array's element type T (numpy-faithful: a[i] = 3.9 on an int64 array stores 3;
+// a[i] = 5 on a float32 array stores 5.0). The Python value is read as a double (which
+// accepts both Python int and float) and static_cast to T — matching numpy's assign
+// semantics for our three real dtypes.
+void setitem_at(Array& a, std::ptrdiff_t off, nb::handle value)
+{
+    double v = nb::cast<double>(nb::borrow(value));    // accepts int or float
+    hpxpy::dispatch_dtype(a.dtype(), [&](auto tag) {
+        using T = decltype(tag);
+        a.template data_as<T>()[off] = static_cast<T>(v);
+    });
 }
 
 }  // namespace
@@ -286,6 +383,16 @@ NB_MODULE(_core, m)
                                  PyLong_FromSize_t(a.shape()[k]));
             return t;
         }, "Shape of the array as a tuple of ints (N-D).")
+        // dtype: the numpy dtype object (so a.dtype == np.float32 works like numpy).
+        .def_prop_ro("dtype", [](Array const& a) {
+            return numpy_dtype_object(a.dtype());
+        }, "The element dtype as a numpy dtype object (float64/float32/int64).")
+        // astype(dtype): a new Array of the target dtype (element-wise static_cast).
+        .def("astype", [](Array const& a, nb::object dt) {
+            DType dst = parse_dtype(dt);
+            nb::gil_scoped_release r;
+            return a.astype(dst);
+        }, "dtype"_a, "Cast to a new Array of the given dtype (element-wise).")
         // sum/min/max: axis=None (default) -> scalar fast path (zero-penalty,
         // contiguous hpx::reduce); axis given (int or tuple) -> N-D axis reduction
         // returning a new Array. keepdims retains the reduced axes as size 1.
@@ -520,12 +627,12 @@ NB_MODULE(_core, m)
                     ++ax;
                 }
 
-                // All-int, full rank -> scalar multi-index (unchanged fast path).
+                // All-int, full rank -> scalar multi-index (dtype-aware read).
                 if (all_int && specs.size() == ndim) {
                     std::vector<std::size_t> idx(ndim);
                     for (std::size_t k = 0; k < ndim; ++k)
                         idx[k] = (std::size_t) specs[k].int_idx;
-                    return nb::cast(a.getitem(idx));
+                    return getitem_at(a, (std::ptrdiff_t) a.linear_offset(idx));
                 }
                 return nb::cast(a.slice_nd(specs));
             }
@@ -590,8 +697,9 @@ NB_MODULE(_core, m)
                 i += n;
             if (i < 0 || i >= n)
                 throw nb::index_error("Array index out of range");
-            return nb::cast(a.getitem((std::size_t) i));
-        }, "a[i] -> float; a[i:j] -> contiguous view; a[i:j:k] -> strided view (zero-copy); "
+            return getitem_at(a, a.offset_1d((std::size_t) i));
+        }, "a[i] -> scalar (float/int by dtype); a[i:j] -> contiguous view; "
+           "a[i:j:k] -> strided view (zero-copy); "
            "a[i,j,...] (tuple of ints, len==ndim) -> scalar (N-D multi-index); "
            "a[i:j, ::k, m, ...] (tuple with slice/Ellipsis) -> N-D view (zero-copy).")
         .def("__setitem__", [](Array& a, nb::object key, nb::object value) {
@@ -616,7 +724,7 @@ NB_MODULE(_core, m)
                         throw nb::index_error("Array index out of range");
                     idx[k] = (std::size_t) ix;
                 }
-                a.setitem(idx, nb::cast<double>(value));
+                setitem_at(a, (std::ptrdiff_t) a.linear_offset(idx), value);
                 return;
             }
             if (PySlice_Check(key.ptr())) {
@@ -649,7 +757,7 @@ NB_MODULE(_core, m)
                 i += n;
             if (i < 0 || i >= n)
                 throw nb::index_error("Array index out of range");
-            a.setitem((std::size_t) i, nb::cast<double>(value));
+            setitem_at(a, a.offset_1d((std::size_t) i), value);
         }, "a[i] = value; a[i:j] = scalar (fill) or Array (copy, contiguous step 1); "
            "a[i,j,...] = scalar (N-D multi-index set).")
         .def("to_numpy", &to_numpy_view,
@@ -659,7 +767,14 @@ NB_MODULE(_core, m)
         })
         .def("__len__", &Array::size)
         .def("__repr__", [](Array const& a) {
-            return "Array(size=" + std::to_string(a.size()) + ")";
+            const char* dn = "float64";
+            switch (a.dtype()) {
+                case DType::F64: dn = "float64"; break;
+                case DType::F32: dn = "float32"; break;
+                case DType::I64: dn = "int64";   break;
+            }
+            return "Array(size=" + std::to_string(a.size()) +
+                   ", dtype=" + dn + ")";
         })
         // --- N-D view ops (stage 3) -----------------------------------------
         // transpose(axes=None): permute axes; empty/None => reverse all.
@@ -759,56 +874,72 @@ NB_MODULE(_core, m)
     }, "a"_a, "b"_a, "op"_a, "budget"_a = 0.5, "min_reps"_a = 5, "max_reps"_a = 200,
        "C++-timed median-of-times (s) and rep count for an element-wise op.");
 
-    // zeros/full/ones accept either an int (1-D) or a tuple/list of ints (N-D).
-    m.def("zeros", [](nb::object shape_arg) -> Array {
+    // zeros/full/ones accept either an int (1-D) or a tuple/list of ints (N-D), plus
+    // a dtype (default float64). dtype is parsed at the binding boundary.
+    m.def("zeros", [](nb::object shape_arg, nb::object dtype) -> Array {
+        DType dt = parse_dtype(dtype);
         if (PyTuple_Check(shape_arg.ptr()) || PyList_Check(shape_arg.ptr())) {
             nb::sequence seq = nb::cast<nb::sequence>(shape_arg);
             std::vector<std::size_t> shape;
             for (nb::handle item : seq)
                 shape.push_back(nb::cast<std::size_t>(item));
-            return hpxpy::zeros_nd(std::move(shape));
+            return hpxpy::zeros_nd(std::move(shape), dt);
         }
-        return hpxpy::zeros(nb::cast<std::size_t>(shape_arg));
-    }, "shape"_a, "Create an Array of zeros. shape may be an int (1-D) or tuple/list (N-D).");
-    m.def("ones", [](nb::object shape_arg) -> Array {
+        return hpxpy::zeros(nb::cast<std::size_t>(shape_arg), dt);
+    }, "shape"_a, "dtype"_a = nb::none(),
+       "Create an Array of zeros. shape may be an int (1-D) or tuple/list (N-D).");
+    m.def("ones", [](nb::object shape_arg, nb::object dtype) -> Array {
+        DType dt = parse_dtype(dtype);
         if (PyTuple_Check(shape_arg.ptr()) || PyList_Check(shape_arg.ptr())) {
             nb::sequence seq = nb::cast<nb::sequence>(shape_arg);
             std::vector<std::size_t> shape;
             for (nb::handle item : seq)
                 shape.push_back(nb::cast<std::size_t>(item));
-            return hpxpy::ones_nd(std::move(shape));
+            return hpxpy::ones_nd(std::move(shape), dt);
         }
-        return hpxpy::full(nb::cast<std::size_t>(shape_arg), 1.0);
-    }, "shape"_a, "Create an Array of ones. shape may be an int (1-D) or tuple/list (N-D).");
-    m.def("full", [](nb::object shape_arg, double value) -> Array {
+        return hpxpy::full(nb::cast<std::size_t>(shape_arg), 1.0, dt);
+    }, "shape"_a, "dtype"_a = nb::none(),
+       "Create an Array of ones. shape may be an int (1-D) or tuple/list (N-D).");
+    m.def("full", [](nb::object shape_arg, double value, nb::object dtype) -> Array {
+        DType dt = parse_dtype(dtype);
         if (PyTuple_Check(shape_arg.ptr()) || PyList_Check(shape_arg.ptr())) {
             nb::sequence seq = nb::cast<nb::sequence>(shape_arg);
             std::vector<std::size_t> shape;
             for (nb::handle item : seq)
                 shape.push_back(nb::cast<std::size_t>(item));
-            return hpxpy::full_nd(std::move(shape), value);
+            return hpxpy::full_nd(std::move(shape), value, dt);
         }
-        return hpxpy::full(nb::cast<std::size_t>(shape_arg), value);
-    }, "shape"_a, "value"_a,
+        return hpxpy::full(nb::cast<std::size_t>(shape_arg), value, dt);
+    }, "shape"_a, "value"_a, "dtype"_a = nb::none(),
        "Create an Array filled with value. shape may be an int (1-D) or tuple/list (N-D).");
-    m.def("arange", &hpxpy::arange, "n"_a,
-          "Create an Array [0, 1, ..., n-1] (NUMA-aware parallel first-touch).");
+    m.def("arange", [](std::size_t n, nb::object dtype) -> Array {
+        return hpxpy::arange(n, parse_dtype(dtype));
+    }, "n"_a, "dtype"_a = nb::none(),
+       "Create an Array [0, 1, ..., n-1] (NUMA-aware parallel first-touch).");
 
     // --- NumPy bridge (Phase 2) -------------------------------------------
     m.def("to_numpy", &to_numpy_view, "a"_a,
           "Zero-copy NumPy view of an Array (writable; shares memory).");
     m.def("from_numpy", [](np_rw arr, bool copy) -> Array {
+        // Map the runtime numpy dtype to our DType (TypeError on unsupported: int32,
+        // float16, complex, ... — never a silent copy/cast).
+        DType dt = dtype_from_nb(arr.dtype());
         std::size_t const nd = arr.ndim();
         std::vector<std::size_t> shape(nd);
         for (std::size_t k = 0; k < nd; ++k)
             shape[k] = arr.shape(k);
         std::size_t const total = arr.size();    // product of all axes
-        double* p = arr.data();
+        void* p = arr.data();
         if (copy) {
-            Array a(shape, 0.0);    // NUMA-aware N-D; correct first-touch for HPX ops
+            Array a(shape, 0.0, dt);    // NUMA-aware N-D; correct first-touch
             if (total) {
                 nb::gil_scoped_release release;
-                hpx::copy(hpx::execution::par, p, p + total, a.mutable_data());
+                hpxpy::dispatch_dtype(dt, [&](auto tag) {
+                    using T = decltype(tag);
+                    T const* src = static_cast<T const*>(p);
+                    hpx::copy(hpx::execution::par, src, src + total,
+                              a.template data_as<T>());
+                });
             }
             return a;
         }
@@ -819,12 +950,12 @@ NB_MODULE(_core, m)
             nb::gil_scoped_acquire g;
             delete static_cast<np_rw*>(q);
         });
-        return Array::borrow_nd(p, std::move(shape), std::move(keep));
+        return Array::borrow_nd(p, std::move(shape), std::move(keep), dt);
     }, nb::arg("a").noconvert(), "copy"_a = true,
-       "Bring a float64 C-contiguous NumPy array (any rank) into hpxpy. copy=True "
-       "(default) copies into a NUMA-aware Array; copy=False borrows it (zero-copy, "
-       "shares memory both ways, but numa-naive). Non-float64/non-contiguous input "
-       "raises (never a silent copy/cast).");
+       "Bring a float64/float32/int64 C-contiguous NumPy array (any rank) into hpxpy. "
+       "copy=True (default) copies into a NUMA-aware Array; copy=False borrows it "
+       "(zero-copy, shares memory both ways, but numa-naive). Unsupported dtype or "
+       "non-contiguous input raises (never a silent copy/cast).");
 
     // --- Sparse (CSR) matrix + SpMV (M5a) ---------------------------------
     nb::class_<hpxpy::CsrMatrix>(m, "CsrMatrix")

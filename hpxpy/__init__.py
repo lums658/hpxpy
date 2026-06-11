@@ -178,12 +178,13 @@ def spmm(a: CsrMatrix, b: DenseMatrix) -> DenseMatrix:
 
 
 def from_numpy(a, copy: bool = True) -> Array:
-    """Bring a 1-D float64 C-contiguous NumPy array into an :class:`Array`.
+    """Bring a float64/float32/int64 C-contiguous NumPy array into an :class:`Array`.
 
     ``copy=True`` (default) copies into a NUMA-aware buffer (correct first-touch, so
     HPX ops keep their performance). ``copy=False`` borrows the NumPy buffer
     zero-copy — hpxpy and NumPy then share memory both ways, but it is numa-naive,
-    so prefer the default for compute. Non-float64/non-contiguous input raises.
+    so prefer the default for compute. Unsupported-dtype or non-contiguous input
+    raises ``TypeError`` (never a silent copy/cast).
     """
     return _core.from_numpy(a, copy)
 
@@ -193,42 +194,51 @@ def to_numpy(a: Array):
     return _core.to_numpy(a)
 
 
-def zeros(shape) -> Array:
+def zeros(shape, dtype=None) -> Array:
     """Create an :class:`Array` of zeros (NUMA-aware HPX allocation).
 
     ``shape`` may be an ``int`` (1-D, backward-compatible) or a ``tuple``/``list``
-    of ints (N-D, row-major C-order).
+    of ints (N-D, row-major C-order). ``dtype`` defaults to ``float64`` and accepts
+    ``float32``/``int64`` (numpy dtype, scalar type, or string).
     """
     if isinstance(shape, (tuple, list)):
-        return _core.zeros(shape)
-    return _core.zeros(int(shape))
+        return _core.zeros(shape, dtype)
+    return _core.zeros(int(shape), dtype)
 
 
-def ones(shape) -> Array:
+def ones(shape, dtype=None) -> Array:
     """Create an :class:`Array` of ones (NUMA-aware HPX allocation).
 
     ``shape`` may be an ``int`` (1-D) or a ``tuple``/``list`` of ints (N-D,
-    row-major C-order).
+    row-major C-order). ``dtype`` defaults to ``float64``.
     """
     if isinstance(shape, (tuple, list)):
-        return _core.ones(shape)
-    return _core.ones(int(shape))
+        return _core.ones(shape, dtype)
+    return _core.ones(int(shape), dtype)
 
 
-def full(shape, value: float) -> Array:
+def full(shape, value: float, dtype=None) -> Array:
     """Create an :class:`Array` filled with ``value`` (NUMA-aware).
 
     ``shape`` may be an ``int`` (1-D, backward-compatible) or a ``tuple``/``list``
-    of ints (N-D, row-major C-order).
+    of ints (N-D, row-major C-order). ``dtype`` defaults to ``float64``.
     """
     if isinstance(shape, (tuple, list)):
-        return _core.full(shape, float(value))
-    return _core.full(int(shape), float(value))
+        return _core.full(shape, float(value), dtype)
+    return _core.full(int(shape), float(value), dtype)
 
 
-def arange(n: int) -> Array:
-    """Create an :class:`Array` ``[0, 1, ..., n-1]`` (NUMA-aware first-touch)."""
-    return _core.arange(int(n))
+def arange(n: int, dtype=None) -> Array:
+    """Create an :class:`Array` ``[0, 1, ..., n-1]`` (NUMA-aware first-touch).
+
+    ``dtype`` defaults to ``float64`` and accepts ``float32``/``int64``.
+    """
+    return _core.arange(int(n), dtype)
+
+
+def astype(a: Array, dtype) -> Array:
+    """Cast ``a`` to a new :class:`Array` of ``dtype`` (element-wise; ``a.astype``)."""
+    return a.astype(dtype)
 
 
 def transpose(a: Array, axes=None) -> Array:
@@ -279,6 +289,7 @@ __all__ = [
     "matmul",
     "sort",
     "cumsum",
+    "astype",
     "transpose",
     "reshape",
     "squeeze",

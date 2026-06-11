@@ -36,18 +36,57 @@
 #include <hpx/threading_base/threading_base_fwd.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace hpxpy {
 
-using numa_alloc = hpx::compute::host::block_allocator<double>;
+template <class T>
+using block_allocator = hpx::compute::host::block_allocator<T>;
+
+using numa_alloc = block_allocator<double>;
 using dvec = hpx::compute::vector<double, numa_alloc>;
+using fvec = hpx::compute::vector<float, block_allocator<float>>;
+// ivec (int64) lives here so array.hpp and sparse.hpp share one typedef (no ODR
+// duplication); sparse.hpp already proves compute::vector<int64_t> on this build.
+using ivec = hpx::compute::vector<std::int64_t, block_allocator<std::int64_t>>;
+
+// ---------------------------------------------------------------------------
+// Runtime element dtype. ONE Array class carries a runtime dt_; the element type
+// is recovered per-op via dispatch_dtype (a switch that calls a generic lambda
+// with a tag value of the matching C++ type, so the body instantiates per T).
+// ---------------------------------------------------------------------------
+enum class DType : std::uint8_t { F64, F32, I64 };
+
+inline std::size_t dtype_size(DType d)
+{
+    switch (d) {
+        case DType::F64: return sizeof(double);
+        case DType::F32: return sizeof(float);
+        case DType::I64: return sizeof(std::int64_t);
+    }
+    return sizeof(double);
+}
+
+// dispatch_dtype(d, f): call f(T{}) where T is the element type for d. f is a
+// generic lambda `[&](auto tag){ using T = decltype(tag); ... }`.
+template <class F>
+inline decltype(auto) dispatch_dtype(DType d, F&& f)
+{
+    switch (d) {
+        case DType::F64: return f(double{});
+        case DType::F32: return f(float{});
+        case DType::I64: return f(std::int64_t{});
+    }
+    return f(double{});    // unreachable; keeps the return type well-formed
+}
 
 // ---------------------------------------------------------------------------
 // N-D unravel helpers (used by the non-contiguous compute else-branches).
@@ -113,19 +152,21 @@ class Array
 public:
     Array() = default;
 
-    // 1-D constructor (backward-compatible): shape={n}, strides={1}.
-    Array(std::size_t n, double fill) { alloc_(n, fill); }
+    // 1-D constructor (backward-compatible): shape={n}, strides={1}. dtype defaults
+    // to float64 so every existing call is identical.
+    Array(std::size_t n, double fill, DType dt = DType::F64) { alloc_(n, fill, dt); }
 
     // N-D constructor: shape may have any number of dims; row-major strides computed.
-    Array(std::vector<std::size_t> shape, double fill)
+    Array(std::vector<std::size_t> shape, double fill, DType dt = DType::F64)
     {
         std::size_t total = 1;
         for (auto d : shape) total *= d;
-        alloc_nd_(std::move(shape), total, fill);
+        alloc_nd_(std::move(shape), total, fill, dt);
     }
 
     std::size_t size() const { return size_; }
     std::size_t ndim() const { return shape_.size(); }
+    DType dtype() const { return dt_; }
 
     // shape/strides accessors (N-D).
     std::vector<std::size_t> const& shape() const { return shape_; }
@@ -147,20 +188,23 @@ public:
         return true;
     }
 
-    // Start of this array's data (nullptr if empty). The const form is also used by
-    // the diagnostic and by to_numpy (zero-copy export).
-    const double* data() const { return base_; }
-    double* mutable_data() { return base_; }
+    // Typed start-of-data accessors. The float64 forms below keep the existing
+    // compute paths byte-for-byte; data_as<T>() recovers the right pointer for any
+    // element type (used by astype, the bridge, and indexing).
+    template <class T> T* data_as() const { return static_cast<T*>(base_); }
 
-    // 1-D element access: index in logical index space; strides_[0] applied.
-    // (Indices are assumed already normalized by the binding layer.)
-    double getitem(std::size_t i) const
+    // Start of this array's data (nullptr if empty). The const form is also used by
+    // the diagnostic and by to_numpy (zero-copy export). float64 view of base_.
+    const double* data() const { return static_cast<const double*>(base_); }
+    double* mutable_data() { return static_cast<double*>(base_); }
+
+    // Raw type-erased start of data (for the runtime-dtype numpy bridge).
+    void* raw_data() const { return base_; }
+
+    // 1-D element offset (in ELEMENTS, signed) for logical index i.
+    std::ptrdiff_t offset_1d(std::size_t i) const
     {
-        return base_[static_cast<std::ptrdiff_t>(i) * strides_[0]];
-    }
-    void setitem(std::size_t i, double v)
-    {
-        base_[static_cast<std::ptrdiff_t>(i) * strides_[0]] = v;
+        return static_cast<std::ptrdiff_t>(i) * strides_[0];
     }
 
     // N-D multi-index access: element at idx[] using strides_.
@@ -171,36 +215,56 @@ public:
             off += static_cast<std::ptrdiff_t>(idx[k]) * strides_[k];
         return static_cast<std::size_t>(off);
     }
+
+    // float64 scalar access (dt_==F64 fast paths). The binding dispatches on dtype()
+    // for non-f64 element types via data_as<T>() + offset_1d/linear_offset.
+    double getitem(std::size_t i) const
+    {
+        return data_as<double>()[offset_1d(i)];
+    }
+    void setitem(std::size_t i, double v)
+    {
+        data_as<double>()[offset_1d(i)] = v;
+    }
     double getitem(std::vector<std::size_t> const& idx) const
     {
-        return base_[linear_offset(idx)];
+        return data_as<double>()[linear_offset(idx)];
     }
     void setitem(std::vector<std::size_t> const& idx, double v)
     {
-        base_[linear_offset(idx)] = v;
+        data_as<double>()[linear_offset(idx)] = v;
     }
 
     // Slice assignment a[start:start+n] = ... (contiguous; binding computes start/n).
     // fill_range broadcasts a scalar; assign_range copies an Array of length n in.
+    // float64-only for now (the dtype compute stage generalizes these).
     void fill_range(std::size_t start, std::size_t n, double v)
     {
-        if (n)
-            hpx::fill(hpx::execution::par, base_ + start, base_ + start + n, v);
+        require_f64_("slice assignment");
+        if (n) {
+            double* b = data_as<double>();
+            hpx::fill(hpx::execution::par, b + start, b + start + n, v);
+        }
     }
     void assign_range(std::size_t start, Array const& rhs)
     {
-        if (rhs.size_)
-            hpx::copy(hpx::execution::par, rhs.base_, rhs.base_ + rhs.size_,
-                base_ + start);
+        require_f64_("slice assignment");
+        rhs.require_f64_("slice assignment");
+        if (rhs.size_) {
+            double const* r = rhs.data_as<double>();
+            hpx::copy(hpx::execution::par, r, r + rhs.size_,
+                data_as<double>() + start);
+        }
     }
 
     // Contiguous view [start, start+n) sharing this array's buffer (numpy a[i:j]).
-    // Returns a 1-D view: shape_={n}, strides_={parent_stride}.
+    // Returns a 1-D view: shape_={n}, strides_={parent_stride}. Carries dt_.
     Array view(std::size_t start, std::size_t n) const
     {
         Array r;
         r.owner_ = owner_;    // share the keep-alive (owned or borrowed parent)
-        r.base_ = base_ ? base_ + static_cast<std::ptrdiff_t>(start) * strides_[0] : nullptr;
+        r.dt_ = dt_;
+        r.base_ = byte_offset_(static_cast<std::ptrdiff_t>(start) * strides_[0]);
         r.size_ = n;
         r.shape_ = {n};
         r.strides_ = {strides_[0]};
@@ -209,12 +273,13 @@ public:
 
     // Strided view: element i is at base_[i*result.strides_[0]] in the result.
     // start and step are in THIS array's logical index space; step may be negative.
-    // Returns a 1-D view: shape_={n}, strides_={parent_stride*step}.
+    // Returns a 1-D view: shape_={n}, strides_={parent_stride*step}. Carries dt_.
     Array view_strided(std::ptrdiff_t start, std::size_t n, std::ptrdiff_t step) const
     {
         Array r;
         r.owner_ = owner_;
-        r.base_ = base_ ? base_ + start * strides_[0] : nullptr;
+        r.dt_ = dt_;
+        r.base_ = byte_offset_(start * strides_[0]);
         r.strides_ = {strides_[0] * step};
         r.shape_ = {n};
         r.size_ = n;
@@ -223,11 +288,13 @@ public:
 
     // Wrap an external buffer (non-owning); `keepalive` keeps it alive. Used by the
     // zero-copy from_numpy borrow; the keep-alive is type-erased so this header stays
-    // nanobind-free (the binding supplies a GIL-aware deleter).
-    static Array borrow(double* p, std::size_t n, std::shared_ptr<void> keepalive)
+    // nanobind-free (the binding supplies a GIL-aware deleter). Carries the dtype.
+    static Array borrow(void* p, std::size_t n, std::shared_ptr<void> keepalive,
+        DType dt = DType::F64)
     {
         Array r;
         r.owner_ = std::move(keepalive);
+        r.dt_ = dt;
         r.base_ = p;
         r.size_ = n;
         r.shape_ = {n};
@@ -237,11 +304,12 @@ public:
 
     // N-D borrow: wrap an external C-contiguous N-D buffer (row-major). Computes
     // row-major strides from shape; `keepalive` keeps the buffer alive (from_numpy).
-    static Array borrow_nd(double* p, std::vector<std::size_t> shape,
-        std::shared_ptr<void> keepalive)
+    static Array borrow_nd(void* p, std::vector<std::size_t> shape,
+        std::shared_ptr<void> keepalive, DType dt = DType::F64)
     {
         Array r;
         r.owner_ = std::move(keepalive);
+        r.dt_ = dt;
         r.base_ = p;
         r.shape_ = std::move(shape);
         std::size_t total = 1;
@@ -285,6 +353,7 @@ public:
         }
         Array r;
         r.owner_ = owner_;
+        r.dt_    = dt_;
         r.base_  = base_;
         r.size_  = size_;
         r.shape_.resize(nd);
@@ -345,9 +414,10 @@ public:
         }
 
         if (is_contiguous()) {
-            // Zero-copy view.
+            // Zero-copy view (works for any dtype).
             Array r;
             r.owner_   = owner_;
+            r.dt_      = dt_;
             r.base_    = base_;
             r.size_    = size_;
             r.shape_   = new_shape;
@@ -355,6 +425,7 @@ public:
             return r;
         }
         // Non-contiguous: copy to a fresh contiguous array, then set shape/strides.
+        // (copy() is float64-only for now; non-contiguous non-f64 reshape will raise.)
         Array c = copy();
         c.shape_   = new_shape;
         c.strides_ = new_strides;
@@ -388,6 +459,7 @@ public:
         }
         Array r;
         r.owner_ = owner_;
+        r.dt_    = dt_;
         r.base_  = base_;
         r.size_  = size_;
         for (std::size_t k = 0; k < nd; ++k) {
@@ -412,6 +484,7 @@ public:
             throw std::invalid_argument("expand_dims: axis out of range");
         Array r;
         r.owner_ = owner_;
+        r.dt_    = dt_;
         r.base_  = base_;
         r.size_  = size_;
         r.shape_.reserve(nd + 1);
@@ -464,7 +537,8 @@ public:
             }
         }
         r.owner_ = owner_;
-        r.base_ = base_ ? base_ + base_off : nullptr;
+        r.dt_ = dt_;
+        r.base_ = byte_offset_(base_off);
         if (r.shape_.empty()) {
             // All axes were INT (out shape empty) -> a 1-element scalar array.
             // (The binding's all-int fast path means this is rarely hit.)
@@ -484,8 +558,10 @@ public:
     // Strided path: hpx::experimental::for_loop with reduction object, zero-copy.
     double sum() const
     {
+        require_f64_("sum");
         if (size_ == 0)
             return 0.0;
+        double* base_ = data_as<double>();
         if (is_contiguous())
             return hpx::reduce(hpx::execution::par, base_, base_ + size_, 0.0);
         double r = 0.0;
@@ -502,8 +578,10 @@ public:
     }
     double min() const
     {
+        require_f64_("min");
         if (size_ == 0)
             throw std::invalid_argument("min() of an empty Array");
+        double* base_ = data_as<double>();
         if (is_contiguous())
             return hpx::reduce(hpx::execution::par, base_, base_ + size_,
                 std::numeric_limits<double>::infinity(),
@@ -524,8 +602,10 @@ public:
     }
     double max() const
     {
+        require_f64_("max");
         if (size_ == 0)
             throw std::invalid_argument("max() of an empty Array");
+        double* base_ = data_as<double>();
         if (is_contiguous())
             return hpx::reduce(hpx::execution::par, base_, base_ + size_,
                 -std::numeric_limits<double>::infinity(),
@@ -548,16 +628,20 @@ public:
     // (contiguous) or for_loop reduction (strided).
     double dot(Array const& other) const
     {
+        require_f64_("dot");
+        other.require_f64_("dot");
         if (size_ != other.size_)
             throw std::invalid_argument("dot(): size mismatch");
         if (size_ == 0)
             return 0.0;
+        double* base_ = data_as<double>();
+        double* obase = other.data_as<double>();
         if (is_contiguous() && other.is_contiguous())
             return hpx::transform_reduce(
-                hpx::execution::par, base_, base_ + size_, other.base_, 0.0);
+                hpx::execution::par, base_, base_ + size_, obase, 0.0);
         double r = 0.0;
         double* ba = base_;
-        double* bb = other.base_;
+        double* bb = obase;
         auto auxa = inner_volumes(shape_);
         auto auxb = inner_volumes(other.shape_);
         auto const& sha = shape_;
@@ -611,6 +695,8 @@ public:
     // contiguous owning Array. NAIVE O(m*n*k); tiled/BLAS optimization is future work.
     Array matmul(Array const& B) const
     {
+        require_f64_("matmul");
+        B.require_f64_("matmul");
         if (ndim() != 2 || B.ndim() != 2)
             throw std::invalid_argument("matmul: both operands must be 2-D");
         std::size_t m = shape_[0];
@@ -621,12 +707,12 @@ public:
             throw std::invalid_argument(
                 "matmul: inner dimensions do not match");
         Array C;
-        C.alloc_nd_({m, n}, m * n, 0.0);
+        C.alloc_nd_({m, n}, m * n, 0.0, DType::F64);
         if (m * n == 0)
             return C;
-        double const* a = base_;
-        double const* b = B.base_;
-        double* c = C.base_;
+        double const* a = data_as<double>();
+        double const* b = B.data_as<double>();
+        double* c = C.data_as<double>();
         std::ptrdiff_t sta0 = strides_[0], sta1 = strides_[1];
         std::ptrdiff_t stb0 = B.strides_[0], stb1 = B.strides_[1];
         hpx::experimental::for_loop(hpx::execution::par,
@@ -664,14 +750,17 @@ public:
     // The result is ALWAYS contiguous row-major with the same shape as *this.
     Array copy() const
     {
+        require_f64_("copy");
         Array r;
-        r.alloc_nd_(shape_, size_, 0.0);
+        r.alloc_nd_(shape_, size_, 0.0, DType::F64);
         if (size_) {
+            double* base_ = data_as<double>();
             if (is_contiguous()) {
-                hpx::copy(hpx::execution::par, base_, base_ + size_, r.base_);
+                hpx::copy(hpx::execution::par, base_, base_ + size_,
+                    r.data_as<double>());
             } else {
                 double* src = base_;
-                double* dst = r.base_;
+                double* dst = r.data_as<double>();
                 auto aux = inner_volumes(shape_);
                 auto const& sh = shape_;
                 auto const& st = strides_;
@@ -689,8 +778,10 @@ public:
     // Strided: gather into a temporary contiguous buffer, sort, scatter back.
     void sort()
     {
+        require_f64_("sort");
         if (size_ < 2)
             return;
+        double* base_ = data_as<double>();
         if (is_contiguous()) {
             hpx::sort(hpx::execution::par, base_, base_ + size_);
         } else {
@@ -709,8 +800,10 @@ public:
     }
     bool is_sorted() const
     {
+        require_f64_("is_sorted");
         if (size_ < 2)
             return true;
+        double* base_ = data_as<double>();
         if (is_contiguous())
             return hpx::is_sorted(hpx::execution::par, base_, base_ + size_);
         // Non-contiguous N-D: AND-reduce over adjacent flat-index pairs.
@@ -732,14 +825,17 @@ public:
     // Strided: gather into the result buffer then do the scan in place.
     Array cumsum() const
     {
+        require_f64_("cumsum");
         Array r;
-        r.alloc_(size_);
+        r.alloc_(size_, 0.0, DType::F64);
         if (size_) {
+            double* base_ = data_as<double>();
             if (is_contiguous()) {
-                hpx::inclusive_scan(hpx::execution::par, base_, base_ + size_, r.base_);
+                hpx::inclusive_scan(hpx::execution::par, base_, base_ + size_,
+                    r.data_as<double>());
             } else {
                 double* src = base_;
-                double* dst = r.base_;
+                double* dst = r.data_as<double>();
                 auto aux = inner_volumes(shape_);
                 auto const& sh = shape_;
                 auto const& st = strides_;
@@ -757,34 +853,109 @@ public:
 
     // 0, 1, 2, ..., n-1. block_allocator first-touches at allocation; the parallel
     // for_loop (run directly) writes the ramp on the same HPX workers (NUMA-local).
-    static Array iota(std::size_t n)
+    // Carries the dtype; the ramp is written in the matching element type T.
+    static Array iota(std::size_t n, DType dt = DType::F64)
     {
         Array a;
-        a.alloc_(n);
-        double* p = a.base_;
+        a.alloc_(n, 0.0, dt);
         if (n)
-            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
-                [p](std::size_t i) { p[i] = static_cast<double>(i); });
+            dispatch_dtype(dt, [&](auto tag) {
+                using T = decltype(tag);
+                T* p = a.template data_as<T>();
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
+                    [p](std::size_t i) { p[i] = static_cast<T>(i); });
+            });
         return a;
     }
 
+    // astype(dst): a new contiguous owning Array of dtype `dst` with element-wise
+    // static_cast from this array's elements. Works for ALL dtypes (no compute guard;
+    // it is a typed copy, not a numeric kernel). Casts through the logical (strided)
+    // order so views convert correctly.
+    Array astype(DType dst) const
+    {
+        Array out;
+        out.alloc_nd_(shape_, size_, 0.0, dst);
+        if (size_ == 0)
+            return out;
+        bool contig = is_contiguous();
+        auto aux = inner_volumes(shape_);
+        auto const& sh = shape_;
+        auto const& st = strides_;
+        dispatch_dtype(dt_, [&](auto src_tag) {
+            using S = decltype(src_tag);
+            S const* src = data_as<S>();
+            dispatch_dtype(dst, [&](auto dst_tag) {
+                using D = decltype(dst_tag);
+                D* dptr = out.template data_as<D>();
+                if (contig) {
+                    hpx::transform(hpx::execution::par, src, src + size_, dptr,
+                        [](S v) { return static_cast<D>(v); });
+                } else {
+                    hpx::experimental::for_loop(hpx::execution::par,
+                        std::size_t(0), size_,
+                        [src, dptr, &sh, &st, &aux](std::size_t i) {
+                            dptr[i] = static_cast<D>(
+                                src[flat_to_offset(i, sh, st, aux)]);
+                        });
+                }
+            });
+        });
+        return out;
+    }
+
 private:
+    // Raise when an element-reading compute kernel is invoked on a non-float64 array.
+    // (float32/int64 compute lands in the next dtype stage A2.2; here only the
+    // float64 numeric paths are wired, so guarding avoids silent-wrong results.)
+    void require_f64_(const char* op) const
+    {
+        if (dt_ != DType::F64)
+            throw std::runtime_error(std::string(op) +
+                ": float32/int64 compute lands in the next dtype stage; "
+                "only float64 is supported here");
+    }
+
+    // Offset base_ by `n` ELEMENTS (signed), accounting for the element size. Returns
+    // nullptr when base_ is null (empty array). Used by views (dtype-agnostic).
+    void* byte_offset_(std::ptrdiff_t n) const
+    {
+        if (base_ == nullptr)
+            return nullptr;
+        return static_cast<void*>(
+            static_cast<char*>(base_) +
+            n * static_cast<std::ptrdiff_t>(dtype_size(dt_)));
+    }
+
+    // Allocate the matching compute::vector<T> for dtype `dt` (value-initialized to
+    // static_cast<T>(fill)) on an HPX thread; set dt_/base_/owner_.
+    void alloc_buffer_(std::size_t n, double fill, DType dt)
+    {
+        dt_ = dt;
+        on_hpx_thread([&] {
+            dispatch_dtype(dt, [&](auto tag) {
+                using T = decltype(tag);
+                using Vec = hpx::compute::vector<T, block_allocator<T>>;
+                auto d = std::make_shared<Vec>(n, static_cast<T>(fill));
+                base_ = n ? static_cast<void*>(d->data()) : nullptr;
+                owner_ = std::move(d);
+            });
+        });
+    }
+
     // Allocate a 1-D owning NUMA buffer of n elements (value-initialized to fill) on an
-    // HPX thread, and point base_/owner_/shape_/strides_/size_ at it.
-    void alloc_(std::size_t n, double fill = 0.0)
+    // HPX thread, and point base_/owner_/shape_/strides_/size_/dt_ at it.
+    void alloc_(std::size_t n, double fill = 0.0, DType dt = DType::F64)
     {
         size_ = n;
         shape_ = {n};
         strides_ = {1};
-        on_hpx_thread([&] {
-            auto d = std::make_shared<dvec>(n, fill);
-            base_ = n ? d->data() : nullptr;
-            owner_ = std::move(d);
-        });
+        alloc_buffer_(n, fill, dt);
     }
 
     // Allocate an N-D owning NUMA buffer: shape already provided; total = product(shape).
-    void alloc_nd_(std::vector<std::size_t> shape, std::size_t total, double fill)
+    void alloc_nd_(std::vector<std::size_t> shape, std::size_t total, double fill,
+        DType dt = DType::F64)
     {
         shape_ = std::move(shape);
         size_ = total;
@@ -796,25 +967,23 @@ private:
             for (std::size_t k = nd - 1; k-- > 0; )
                 strides_[k] = static_cast<std::ptrdiff_t>(shape_[k + 1]) * strides_[k + 1];
         }
-        std::size_t n = total;
-        on_hpx_thread([&] {
-            auto d = std::make_shared<dvec>(n, fill);
-            base_ = n ? d->data() : nullptr;
-            owner_ = std::move(d);
-        });
+        alloc_buffer_(total, fill, dt);
     }
 
     template <typename Op>
     Array unary(Op op) const
     {
+        require_f64_("elementwise op");
         Array r;
-        r.alloc_nd_(shape_, size_, 0.0);
+        r.alloc_nd_(shape_, size_, 0.0, DType::F64);
         if (size_) {
+            double* base_ = data_as<double>();
             if (is_contiguous()) {
-                hpx::transform(hpx::execution::par, base_, base_ + size_, r.base_, op);
+                hpx::transform(hpx::execution::par, base_, base_ + size_,
+                    r.data_as<double>(), op);
             } else {
                 double* src = base_;
-                double* dst = r.base_;
+                double* dst = r.data_as<double>();
                 auto aux = inner_volumes(shape_);
                 auto const& sh = shape_;
                 auto const& st = strides_;
@@ -835,6 +1004,7 @@ private:
     Array reduce_axis(std::vector<std::size_t> axes, bool keepdims,
         double identity, Combine combine, bool throw_empty) const
     {
+        require_f64_("axis reduction");
         std::size_t nd = shape_.size();
         // Partition axes into reduced vs kept (axes is sorted/unique/in-range).
         std::vector<bool> is_red(nd, false);
@@ -866,12 +1036,12 @@ private:
                 "axis reduction over an empty axis is undefined (min/max)");
 
         Array out;
-        out.alloc_nd_(out_shape, out_size, identity);
+        out.alloc_nd_(out_shape, out_size, identity, DType::F64);
         if (out_size == 0 || red_size == 0)
             return out;    // sum over empty reduced extent => zeros (identity fill)
 
-        double const* b = base_;
-        double* dst = out.base_;
+        double const* b = data_as<double>();
+        double* dst = out.data_as<double>();
         auto kept_aux = inner_volumes(kept_shape);
         auto red_aux = inner_volumes(red_shape);
         auto const& st = strides_;
@@ -957,7 +1127,7 @@ private:
         std::size_t rr = rshape.size();
         std::size_t rx = x.shape_.size();
         BcastView v;
-        v.base = x.base_;
+        v.base = x.data_as<double>();
         v.shape = rshape;
         v.strides.resize(rr, 0);
         for (std::size_t k = 0; k < rr; ++k) {
@@ -978,13 +1148,18 @@ private:
     template <typename Op>
     Array binary(Array const& o, Op op) const
     {
+        require_f64_("elementwise op");
+        o.require_f64_("elementwise op");
+        double* base_ = data_as<double>();
+        double* obase = o.data_as<double>();
         // ---- FAST PATH (zero-penalty): same shape, both contiguous ----
         if (shape_ == o.shape_ && is_contiguous() && o.is_contiguous()) {
             Array r;
-            r.alloc_nd_(shape_, size_, 0.0);
+            r.alloc_nd_(shape_, size_, 0.0, DType::F64);
             if (size_)
                 hpx::transform(
-                    hpx::execution::par, base_, base_ + size_, o.base_, r.base_, op);
+                    hpx::execution::par, base_, base_ + size_, obase,
+                    r.data_as<double>(), op);
             return r;
         }
 
@@ -995,7 +1170,7 @@ private:
         for (auto d : rshape) rsize *= d;
 
         Array r;
-        r.alloc_nd_(rshape, rsize, 0.0);
+        r.alloc_nd_(rshape, rsize, 0.0, DType::F64);
         if (rsize == 0)
             return r;
 
@@ -1004,7 +1179,7 @@ private:
         BcastView vb = make_bcast_view(o, rshape);
         double* ba = va.base;
         double* bb = vb.base;
-        double* dst = r.base_;
+        double* dst = r.data_as<double>();
         auto aux = inner_volumes(rshape);
         auto sha = va.shape;
         auto sta = va.strides;
@@ -1019,20 +1194,24 @@ private:
         return r;
     }
 
-    std::shared_ptr<void> owner_;    // keeps the backing alive (dvec, or numpy ref)
-    double* base_ = nullptr;         // start of this array's data (offset folded in)
+    std::shared_ptr<void> owner_;    // keeps the backing alive (dvec/fvec/ivec, or numpy)
+    void* base_ = nullptr;           // type-erased start of data (offset folded in)
+    DType dt_ = DType::F64;          // runtime element dtype (default float64)
     std::size_t size_ = 0;           // total element count = product(shape_)
     std::vector<std::size_t> shape_; // N-D shape (1 entry for 1-D)
     std::vector<std::ptrdiff_t> strides_; // element strides (row-major C-order for owning)
 };
 
-inline Array zeros(std::size_t n) { return Array(n, 0.0); }
-inline Array full(std::size_t n, double value) { return Array(n, value); }
-inline Array arange(std::size_t n) { return Array::iota(n); }
+inline Array zeros(std::size_t n, DType dt = DType::F64) { return Array(n, 0.0, dt); }
+inline Array full(std::size_t n, double value, DType dt = DType::F64) { return Array(n, value, dt); }
+inline Array arange(std::size_t n, DType dt = DType::F64) { return Array::iota(n, dt); }
 
 // N-D overloads
-inline Array zeros_nd(std::vector<std::size_t> shape) { return Array(std::move(shape), 0.0); }
-inline Array ones_nd(std::vector<std::size_t> shape) { return Array(std::move(shape), 1.0); }
-inline Array full_nd(std::vector<std::size_t> shape, double value) { return Array(std::move(shape), value); }
+inline Array zeros_nd(std::vector<std::size_t> shape, DType dt = DType::F64)
+{ return Array(std::move(shape), 0.0, dt); }
+inline Array ones_nd(std::vector<std::size_t> shape, DType dt = DType::F64)
+{ return Array(std::move(shape), 1.0, dt); }
+inline Array full_nd(std::vector<std::size_t> shape, double value, DType dt = DType::F64)
+{ return Array(std::move(shape), value, dt); }
 
 }    // namespace hpxpy

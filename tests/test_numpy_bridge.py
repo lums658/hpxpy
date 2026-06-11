@@ -77,9 +77,20 @@ def test_borrow_outlives_source_reference():
 
 # --- dtype / contiguity errors (no silent copy/cast) ------------------------
 
-def test_from_numpy_rejects_float32():
+def test_from_numpy_float32_roundtrip():
+    # float32 is now an accepted dtype (stage A2.1): round-trip preserves it.
+    npx = np.arange(10, dtype=np.float32)
+    a = hpx.from_numpy(npx)
+    assert a.dtype == np.float32
+    np.testing.assert_array_equal(np.asarray(a), npx)
+
+
+def test_from_numpy_rejects_unsupported_dtype():
+    # int32 / float16 remain unsupported -> TypeError (no silent cast).
     with pytest.raises(TypeError):
-        hpx.from_numpy(np.arange(10, dtype=np.float32))
+        hpx.from_numpy(np.arange(10, dtype=np.int32))
+    with pytest.raises(TypeError):
+        hpx.from_numpy(np.arange(10, dtype=np.float16))
 
 
 def test_from_numpy_rejects_noncontiguous():
