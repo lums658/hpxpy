@@ -23,8 +23,7 @@
 
 namespace hpxpy {
 
-using ivec =
-    hpx::compute::vector<std::int64_t, hpx::compute::host::block_allocator<std::int64_t>>;
+// ivec (int64 compute::vector) is defined in array.hpp and shared here.
 
 class CsrMatrix
 {
