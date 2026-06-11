@@ -35,6 +35,7 @@
 #include <hpx/runtime_local/run_as_hpx_thread.hpp>
 #include <hpx/threading_base/threading_base_fwd.hpp>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -104,7 +105,7 @@ inline decltype(auto) dispatch_dtype(DType d, F&& f)
 // ---------------------------------------------------------------------------
 
 struct BcastView {
-    double* base;
+    void* base;    // type-erased (recovered as T* inside the per-dtype dispatch)
     std::vector<std::size_t> shape;
     std::vector<std::ptrdiff_t> strides;
 };
@@ -558,103 +559,121 @@ public:
     // Strided path: hpx::experimental::for_loop with reduction object, zero-copy.
     double sum() const
     {
-        require_f64_("sum");
         if (size_ == 0)
             return 0.0;
-        double* base_ = data_as<double>();
-        if (is_contiguous())
-            return hpx::reduce(hpx::execution::par, base_, base_ + size_, 0.0);
-        double r = 0.0;
-        double* b = base_;
-        auto aux = inner_volumes(shape_);
-        auto const& sh  = shape_;
-        auto const& st  = strides_;
-        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
-            hpx::experimental::reduction(r, 0.0, std::plus<double>{}),
-            [b, &sh, &st, &aux](std::size_t i, double& acc) {
-                acc += b[flat_to_offset(i, sh, st, aux)];
-            });
-        return r;
+        return dispatch_dtype(dt_, [&](auto tag) -> double {
+            using T = decltype(tag);
+            T* base_ = data_as<T>();
+            if (is_contiguous())
+                return static_cast<double>(
+                    hpx::reduce(hpx::execution::par, base_, base_ + size_, T(0)));
+            T r = T(0);
+            T* b = base_;
+            auto aux = inner_volumes(shape_);
+            auto const& sh  = shape_;
+            auto const& st  = strides_;
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                hpx::experimental::reduction(r, T(0), std::plus<T>{}),
+                [b, &sh, &st, &aux](std::size_t i, T& acc) {
+                    acc += b[flat_to_offset(i, sh, st, aux)];
+                });
+            return static_cast<double>(r);
+        });
     }
     double min() const
     {
-        require_f64_("min");
         if (size_ == 0)
             throw std::invalid_argument("min() of an empty Array");
-        double* base_ = data_as<double>();
-        if (is_contiguous())
-            return hpx::reduce(hpx::execution::par, base_, base_ + size_,
-                std::numeric_limits<double>::infinity(),
-                [](double x, double y) { return x < y ? x : y; });
-        double r = std::numeric_limits<double>::infinity();
-        double* b = base_;
-        auto aux = inner_volumes(shape_);
-        auto const& sh  = shape_;
-        auto const& st  = strides_;
-        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
-            hpx::experimental::reduction(r, std::numeric_limits<double>::infinity(),
-                [](double x, double y) { return x < y ? x : y; }),
-            [b, &sh, &st, &aux](std::size_t i, double& acc) {
-                double v = b[flat_to_offset(i, sh, st, aux)];
-                if (v < acc) acc = v;
-            });
-        return r;
+        return dispatch_dtype(dt_, [&](auto tag) -> double {
+            using T = decltype(tag);
+            // Identity that works for float AND integer T (±infinity() is 0 for
+            // integral types, which would corrupt the reduction).
+            constexpr T id = std::numeric_limits<T>::max();
+            T* base_ = data_as<T>();
+            if (is_contiguous())
+                return static_cast<double>(hpx::reduce(hpx::execution::par,
+                    base_, base_ + size_, id,
+                    [](T x, T y) { return x < y ? x : y; }));
+            T r = id;
+            T* b = base_;
+            auto aux = inner_volumes(shape_);
+            auto const& sh  = shape_;
+            auto const& st  = strides_;
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                hpx::experimental::reduction(r, id,
+                    [](T x, T y) { return x < y ? x : y; }),
+                [b, &sh, &st, &aux](std::size_t i, T& acc) {
+                    T v = b[flat_to_offset(i, sh, st, aux)];
+                    if (v < acc) acc = v;
+                });
+            return static_cast<double>(r);
+        });
     }
     double max() const
     {
-        require_f64_("max");
         if (size_ == 0)
             throw std::invalid_argument("max() of an empty Array");
-        double* base_ = data_as<double>();
-        if (is_contiguous())
-            return hpx::reduce(hpx::execution::par, base_, base_ + size_,
-                -std::numeric_limits<double>::infinity(),
-                [](double x, double y) { return x > y ? x : y; });
-        double r = -std::numeric_limits<double>::infinity();
-        double* b = base_;
-        auto aux = inner_volumes(shape_);
-        auto const& sh  = shape_;
-        auto const& st  = strides_;
-        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
-            hpx::experimental::reduction(r, -std::numeric_limits<double>::infinity(),
-                [](double x, double y) { return x > y ? x : y; }),
-            [b, &sh, &st, &aux](std::size_t i, double& acc) {
-                double v = b[flat_to_offset(i, sh, st, aux)];
-                if (v > acc) acc = v;
-            });
-        return r;
+        return dispatch_dtype(dt_, [&](auto tag) -> double {
+            using T = decltype(tag);
+            // lowest() is the most-negative finite value for float AND integer T
+            // (the integer trap: -infinity() is 0, not INT_MIN).
+            constexpr T id = std::numeric_limits<T>::lowest();
+            T* base_ = data_as<T>();
+            if (is_contiguous())
+                return static_cast<double>(hpx::reduce(hpx::execution::par,
+                    base_, base_ + size_, id,
+                    [](T x, T y) { return x > y ? x : y; }));
+            T r = id;
+            T* b = base_;
+            auto aux = inner_volumes(shape_);
+            auto const& sh  = shape_;
+            auto const& st  = strides_;
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                hpx::experimental::reduction(r, id,
+                    [](T x, T y) { return x > y ? x : y; }),
+                [b, &sh, &st, &aux](std::size_t i, T& acc) {
+                    T v = b[flat_to_offset(i, sh, st, aux)];
+                    if (v > acc) acc = v;
+                });
+            return static_cast<double>(r);
+        });
     }
     // Fused dot product: a SINGLE pass (multiply+accumulate) via transform_reduce
     // (contiguous) or for_loop reduction (strided).
     double dot(Array const& other) const
     {
-        require_f64_("dot");
-        other.require_f64_("dot");
+        if (dt_ != other.dt_)
+            throw std::invalid_argument(
+                "operands have different dtypes (dot); cast explicitly with "
+                ".astype() — automatic type promotion is not yet supported");
         if (size_ != other.size_)
             throw std::invalid_argument("dot(): size mismatch");
         if (size_ == 0)
             return 0.0;
-        double* base_ = data_as<double>();
-        double* obase = other.data_as<double>();
-        if (is_contiguous() && other.is_contiguous())
-            return hpx::transform_reduce(
-                hpx::execution::par, base_, base_ + size_, obase, 0.0);
-        double r = 0.0;
-        double* ba = base_;
-        double* bb = obase;
-        auto auxa = inner_volumes(shape_);
-        auto auxb = inner_volumes(other.shape_);
-        auto const& sha = shape_;
-        auto const& sta = strides_;
-        auto const& shb = other.shape_;
-        auto const& stb = other.strides_;
-        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
-            hpx::experimental::reduction(r, 0.0, std::plus<double>{}),
-            [ba, bb, &sha, &sta, &auxa, &shb, &stb, &auxb](std::size_t i, double& acc) {
-                acc += ba[flat_to_offset(i, sha, sta, auxa)] *
-                       bb[flat_to_offset(i, shb, stb, auxb)];
-            });
-        return r;
+        return dispatch_dtype(dt_, [&](auto tag) -> double {
+            using T = decltype(tag);
+            T* base_ = data_as<T>();
+            T* obase = other.data_as<T>();
+            if (is_contiguous() && other.is_contiguous())
+                return static_cast<double>(hpx::transform_reduce(
+                    hpx::execution::par, base_, base_ + size_, obase, T(0)));
+            T r = T(0);
+            T* ba = base_;
+            T* bb = obase;
+            auto auxa = inner_volumes(shape_);
+            auto auxb = inner_volumes(other.shape_);
+            auto const& sha = shape_;
+            auto const& sta = strides_;
+            auto const& shb = other.shape_;
+            auto const& stb = other.strides_;
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                hpx::experimental::reduction(r, T(0), std::plus<T>{}),
+                [ba, bb, &sha, &sta, &auxa, &shb, &stb, &auxb](std::size_t i, T& acc) {
+                    acc += ba[flat_to_offset(i, sha, sta, auxa)] *
+                           bb[flat_to_offset(i, shb, stb, auxb)];
+                });
+            return static_cast<double>(r);
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -733,18 +752,40 @@ public:
 
     // Element-wise binary ops -> a NEW (owning) Array. One hpx::transform pass
     // (contiguous) or for_loop element-wise (strided; result is always contiguous).
-    Array add(Array const& o) const { return binary(o, std::plus<double>{}); }
-    Array sub(Array const& o) const { return binary(o, std::minus<double>{}); }
-    Array mul(Array const& o) const { return binary(o, std::multiplies<double>{}); }
-    Array div(Array const& o) const { return binary(o, std::divides<double>{}); }
+    // Transparent functors (std::plus<> etc.) let binary() instantiate the op at
+    // the element type T inside its per-dtype dispatch.
+    Array add(Array const& o) const { return binary(o, std::plus<>{}); }
+    Array sub(Array const& o) const { return binary(o, std::minus<>{}); }
+    Array mul(Array const& o) const { return binary(o, std::multiplies<>{}); }
+    Array div(Array const& o) const
+    {
+        // True division on integers would silently floor (numpy yields float64);
+        // defer int true-division to A2.3 rather than truncate. Float dtypes proceed.
+        require_float_("true division");
+        return binary(o, std::divides<>{});
+    }
 
     // Scalar broadcast -> new Array. The r* forms are reflected (s - a, s / a).
-    Array add_scalar(double s) const { return unary([s](double x) { return x + s; }); }
-    Array sub_scalar(double s) const { return unary([s](double x) { return x - s; }); }
-    Array rsub_scalar(double s) const { return unary([s](double x) { return s - x; }); }
-    Array mul_scalar(double s) const { return unary([s](double x) { return x * s; }); }
-    Array div_scalar(double s) const { return unary([s](double x) { return x / s; }); }
-    Array rdiv_scalar(double s) const { return unary([s](double x) { return s / x; }); }
+    // The op is a generic lambda taking (T x, T s); scalar_unary_ casts the Python
+    // double `s` to T per-dtype (rejecting a non-integral scalar on an int64 array).
+    Array add_scalar(double s) const
+    { return scalar_unary_(s, [](auto x, auto sc) { return x + sc; }); }
+    Array sub_scalar(double s) const
+    { return scalar_unary_(s, [](auto x, auto sc) { return x - sc; }); }
+    Array rsub_scalar(double s) const
+    { return scalar_unary_(s, [](auto x, auto sc) { return sc - x; }); }
+    Array mul_scalar(double s) const
+    { return scalar_unary_(s, [](auto x, auto sc) { return x * sc; }); }
+    Array div_scalar(double s) const
+    {
+        require_float_("true division");
+        return scalar_unary_(s, [](auto x, auto sc) { return x / sc; });
+    }
+    Array rdiv_scalar(double s) const
+    {
+        require_float_("true division");
+        return scalar_unary_(s, [](auto x, auto sc) { return sc / x; });
+    }
 
     // Deep copy -> a new independent (owning) contiguous Array (numpy a.copy()).
     // The result is ALWAYS contiguous row-major with the same shape as *this.
@@ -916,6 +957,16 @@ private:
                 "only float64 is supported here");
     }
 
+    // Reject integer dtypes for ops that are float-only for now (true division —
+    // integer true-division would floor; numpy promotes to float64; deferred to A2.3).
+    void require_float_(const char* op) const
+    {
+        if (dt_ == DType::I64)
+            throw std::runtime_error(std::string(op) +
+                ": int64 true-division lands in a later dtype stage "
+                "(would silently floor); cast to a float dtype with .astype()");
+    }
+
     // Offset base_ by `n` ELEMENTS (signed), accounting for the element size. Returns
     // nullptr when base_ is null (empty array). Used by views (dtype-agnostic).
     void* byte_offset_(std::ptrdiff_t n) const
@@ -970,31 +1021,55 @@ private:
         alloc_buffer_(total, fill, dt);
     }
 
+    // Element-wise unary map -> a new owning Array of THIS array's dtype. `op` is a
+    // generic callable op(T x) -> T (instantiated at the element type T inside the
+    // per-dtype dispatch). For T=double this is byte-identical to the prior f64-only
+    // kernel (F64 dispatch arm = the former body).
     template <typename Op>
     Array unary(Op op) const
     {
-        require_f64_("elementwise op");
         Array r;
-        r.alloc_nd_(shape_, size_, 0.0, DType::F64);
+        r.alloc_nd_(shape_, size_, 0.0, dt_);
         if (size_) {
-            double* base_ = data_as<double>();
-            if (is_contiguous()) {
-                hpx::transform(hpx::execution::par, base_, base_ + size_,
-                    r.data_as<double>(), op);
-            } else {
-                double* src = base_;
-                double* dst = r.data_as<double>();
-                auto aux = inner_volumes(shape_);
-                auto const& sh = shape_;
-                auto const& st = strides_;
-                hpx::experimental::for_loop(hpx::execution::par,
-                    std::size_t(0), size_,
-                    [src, dst, &sh, &st, &aux, op](std::size_t i) {
-                        dst[i] = op(src[flat_to_offset(i, sh, st, aux)]);
-                    });
-            }
+            dispatch_dtype(dt_, [&](auto tag) {
+                using T = decltype(tag);
+                T* base_ = data_as<T>();
+                if (is_contiguous()) {
+                    hpx::transform(hpx::execution::par, base_, base_ + size_,
+                        r.template data_as<T>(), op);
+                } else {
+                    T* src = base_;
+                    T* dst = r.template data_as<T>();
+                    auto aux = inner_volumes(shape_);
+                    auto const& sh = shape_;
+                    auto const& st = strides_;
+                    hpx::experimental::for_loop(hpx::execution::par,
+                        std::size_t(0), size_,
+                        [src, dst, &sh, &st, &aux, op](std::size_t i) {
+                            dst[i] = op(src[flat_to_offset(i, sh, st, aux)]);
+                        });
+                }
+            });
         }
         return r;
+    }
+
+    // Scalar broadcast helper: bind the Python double `s` (cast to the array's
+    // element type T) into the generic op f(T x, T s) and run it as a unary map.
+    // int64 trap: a non-integral float scalar on an int64 array would silently
+    // truncate, so reject it (automatic int<->float promotion is deferred to A2.4).
+    template <typename F>
+    Array scalar_unary_(double s, F f) const
+    {
+        if (dt_ == DType::I64 && s != std::floor(s))
+            throw std::invalid_argument(
+                "cannot apply a non-integral float scalar to an int64 array; "
+                "cast explicitly with .astype() — automatic type promotion is "
+                "not yet supported");
+        return unary([s, f](auto x) {
+            using T = decltype(x);
+            return f(x, static_cast<T>(s));
+        });
     }
 
     // Generic axis-reduction kernel shared by sum_axis/min_axis/max_axis.
@@ -1127,7 +1202,7 @@ private:
         std::size_t rr = rshape.size();
         std::size_t rx = x.shape_.size();
         BcastView v;
-        v.base = x.data_as<double>();
+        v.base = x.base_;    // type-erased; recovered as T* inside binary()'s dispatch
         v.shape = rshape;
         v.strides.resize(rr, 0);
         for (std::size_t k = 0; k < rr; ++k) {
@@ -1148,50 +1223,57 @@ private:
     template <typename Op>
     Array binary(Array const& o, Op op) const
     {
-        require_f64_("elementwise op");
-        o.require_f64_("elementwise op");
-        double* base_ = data_as<double>();
-        double* obase = o.data_as<double>();
-        // ---- FAST PATH (zero-penalty): same shape, both contiguous ----
-        if (shape_ == o.shape_ && is_contiguous() && o.is_contiguous()) {
+        // Same-dtype rule: no automatic promotion yet (A2.4). The result dtype is
+        // the operand dtype. (-> Python ValueError via nanobind.)
+        if (dt_ != o.dt_)
+            throw std::invalid_argument(
+                "operands have different dtypes (elementwise op); cast explicitly "
+                "with .astype() — automatic type promotion is not yet supported");
+        return dispatch_dtype(dt_, [&](auto tag) -> Array {
+            using T = decltype(tag);
+            T* base_ = data_as<T>();
+            T* obase = o.data_as<T>();
+            // ---- FAST PATH (zero-penalty): same shape, both contiguous ----
+            if (shape_ == o.shape_ && is_contiguous() && o.is_contiguous()) {
+                Array r;
+                r.alloc_nd_(shape_, size_, 0.0, dt_);
+                if (size_)
+                    hpx::transform(
+                        hpx::execution::par, base_, base_ + size_, obase,
+                        r.template data_as<T>(), op);
+                return r;
+            }
+
+            // ---- Compute result shape (broadcast or same-shape) ----
+            std::vector<std::size_t> rshape =
+                (shape_ == o.shape_) ? shape_ : broadcast_shapes(shape_, o.shape_);
+            std::size_t rsize = 1;
+            for (auto d : rshape) rsize *= d;
+
             Array r;
-            r.alloc_nd_(shape_, size_, 0.0, DType::F64);
-            if (size_)
-                hpx::transform(
-                    hpx::execution::par, base_, base_ + size_, obase,
-                    r.data_as<double>(), op);
+            r.alloc_nd_(rshape, rsize, 0.0, dt_);
+            if (rsize == 0)
+                return r;
+
+            // Build broadcast views of *this and o aligned to rshape.
+            BcastView va = make_bcast_view(*this, rshape);
+            BcastView vb = make_bcast_view(o, rshape);
+            T* ba = static_cast<T*>(va.base);
+            T* bb = static_cast<T*>(vb.base);
+            T* dst = r.template data_as<T>();
+            auto aux = inner_volumes(rshape);
+            auto sha = va.shape;
+            auto sta = va.strides;
+            auto shb = vb.shape;
+            auto stb = vb.strides;
+            hpx::experimental::for_loop(hpx::execution::par,
+                std::size_t(0), rsize,
+                [ba, bb, dst, sha, sta, shb, stb, aux, op](std::size_t i) {
+                    dst[i] = op(ba[flat_to_offset(i, sha, sta, aux)],
+                                bb[flat_to_offset(i, shb, stb, aux)]);
+                });
             return r;
-        }
-
-        // ---- Compute result shape (broadcast or same-shape) ----
-        std::vector<std::size_t> rshape =
-            (shape_ == o.shape_) ? shape_ : broadcast_shapes(shape_, o.shape_);
-        std::size_t rsize = 1;
-        for (auto d : rshape) rsize *= d;
-
-        Array r;
-        r.alloc_nd_(rshape, rsize, 0.0, DType::F64);
-        if (rsize == 0)
-            return r;
-
-        // Build broadcast views of *this and o aligned to rshape.
-        BcastView va = make_bcast_view(*this, rshape);
-        BcastView vb = make_bcast_view(o, rshape);
-        double* ba = va.base;
-        double* bb = vb.base;
-        double* dst = r.data_as<double>();
-        auto aux = inner_volumes(rshape);
-        auto sha = va.shape;
-        auto sta = va.strides;
-        auto shb = vb.shape;
-        auto stb = vb.strides;
-        hpx::experimental::for_loop(hpx::execution::par,
-            std::size_t(0), rsize,
-            [ba, bb, dst, sha, sta, shb, stb, aux, op](std::size_t i) {
-                dst[i] = op(ba[flat_to_offset(i, sha, sta, aux)],
-                            bb[flat_to_offset(i, shb, stb, aux)]);
-            });
-        return r;
+        });
     }
 
     std::shared_ptr<void> owner_;    // keeps the backing alive (dvec/fvec/ivec, or numpy)

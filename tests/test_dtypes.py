@@ -234,37 +234,38 @@ def test_view_values_correct_for_dtype():
     np.testing.assert_array_equal(np.asarray(a[1:3]), npx[1:3])
 
 
-# --- non-float64 compute is GUARDED to raise (next stage A2.2) ---------------
+# --- core element-wise compute now works on non-float64 (A2.2) --------------
+# (sum/min/max/dot/add/sub/mul + scalar ops were GUARDED in A2.1; A2.2 templated
+#  the kernels over the element type, so they now compute. Detailed numpy-oracle
+#  coverage lives in test_dtypes_compute.py; these are the updated A2.1 guards.)
 
-def test_float32_sum_raises():
-    with pytest.raises(RuntimeError):
-        hpx.zeros(4, dtype=np.float32).sum()
-
-
-def test_int64_sum_raises():
-    with pytest.raises(RuntimeError):
-        hpx.zeros(4, dtype=np.int64).sum()
+def test_float32_sum_now_works():
+    assert hpx.zeros(4, dtype=np.float32).sum() == 0.0
 
 
-def test_float32_add_raises():
+def test_int64_sum_now_works():
+    a = hpx.arange(4, dtype=np.int64)
+    assert a.sum() == np.arange(4).sum()
+
+
+def test_float32_add_now_works():
     a = hpx.ones(4, dtype=np.float32)
     b = hpx.ones(4, dtype=np.float32)
-    with pytest.raises(RuntimeError):
-        a + b
+    np.testing.assert_array_equal(np.asarray(a + b), np.full(4, 2.0, np.float32))
 
 
-def test_float32_scalar_add_raises():
-    with pytest.raises(RuntimeError):
-        hpx.ones(4, dtype=np.float32) + 1.0
+def test_float32_scalar_add_now_works():
+    a = hpx.ones(4, dtype=np.float32)
+    np.testing.assert_array_equal(np.asarray(a + 1.0), np.full(4, 2.0, np.float32))
 
 
-def test_int64_min_max_raises():
+def test_int64_min_max_now_works():
     a = hpx.arange(4, dtype=np.int64)
-    with pytest.raises(RuntimeError):
-        a.min()
-    with pytest.raises(RuntimeError):
-        a.max()
+    assert a.min() == 0
+    assert a.max() == 3
 
+
+# --- ops still GUARDED to float64 (deferred to later A2.x stages) ------------
 
 def test_float32_copy_raises():
     with pytest.raises(RuntimeError):
