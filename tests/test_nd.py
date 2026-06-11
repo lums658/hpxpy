@@ -217,25 +217,27 @@ def test_2d_setitem_oob():
 
 
 # ---------------------------------------------------------------------------
-# Tuple with a slice raises NotImplementedError (stage 6 boundary)
+# Tuple with a slice now returns an N-D view (stage 6). Full coverage lives in
+# tests/test_nd_slicing.py; these guard the basic get behavior here. N-D slice
+# ASSIGNMENT remains deferred (still raises).
 # ---------------------------------------------------------------------------
 
-def test_nd_slice_key_raises_getitem():
+def test_nd_slice_key_getitem_view():
     a = hpx.zeros((3, 4))
-    with pytest.raises((NotImplementedError, TypeError)):
-        _ = a[0:2, 1]
+    v = a[0:2, 1]            # axis-drop: shape (2,)
+    assert tuple(v.shape) == (2,)
 
 
-def test_nd_slice_key_raises_setitem():
+def test_nd_slice_assign_raises_setitem():
     a = hpx.zeros((3, 4))
     with pytest.raises((NotImplementedError, TypeError)):
         a[0:2, 1] = 0.0
 
 
-def test_nd_slice_all_slices_raises():
+def test_nd_slice_all_slices_view():
     a = hpx.zeros((3, 4))
-    with pytest.raises((NotImplementedError, TypeError)):
-        _ = a[0:2, 0:3]
+    v = a[0:2, 0:3]          # both axes survive: shape (2, 3)
+    assert tuple(v.shape) == (2, 3)
 
 
 # ---------------------------------------------------------------------------

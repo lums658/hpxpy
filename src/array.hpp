@@ -429,6 +429,56 @@ public:
         return r;
     }
 
+    // -----------------------------------------------------------------------
+    // N-D multi-axis slicing (stage 6) — zero-copy view, numpy a[i:j, ::k, m].
+    //
+    // AxisSpec describes ONE input axis: either an INT (the axis is dropped from
+    // the output, contributing int_idx*stride to the base offset) or a SLICE
+    // (the axis survives with length slicelen and stride strides_[ax]*step,
+    // starting at start*stride). start/step are signed (step<0 => reverse view,
+    // negative output stride — same convention as view_strided).
+    // -----------------------------------------------------------------------
+    struct AxisSpec
+    {
+        enum Kind { INT, SLICE } kind;
+        std::ptrdiff_t int_idx = 0;    // INT: normalized, in-range index
+        std::ptrdiff_t start = 0;      // SLICE: adjusted start
+        std::ptrdiff_t step = 1;       // SLICE: adjusted step (may be negative)
+        std::size_t slicelen = 0;      // SLICE: number of elements
+    };
+
+    // slice_nd(specs): specs.size() must equal ndim (the binding pads with full
+    // slices / expands Ellipsis). Returns a zero-copy view sharing owner_.
+    Array slice_nd(std::vector<AxisSpec> const& specs) const
+    {
+        std::ptrdiff_t base_off = 0;
+        Array r;
+        for (std::size_t ax = 0; ax < specs.size(); ++ax) {
+            AxisSpec const& s = specs[ax];
+            if (s.kind == AxisSpec::INT) {
+                base_off += s.int_idx * strides_[ax];    // drop this axis
+            } else {
+                base_off += s.start * strides_[ax];
+                r.shape_.push_back(s.slicelen);
+                r.strides_.push_back(strides_[ax] * s.step);
+            }
+        }
+        r.owner_ = owner_;
+        r.base_ = base_ ? base_ + base_off : nullptr;
+        if (r.shape_.empty()) {
+            // All axes were INT (out shape empty) -> a 1-element scalar array.
+            // (The binding's all-int fast path means this is rarely hit.)
+            r.shape_ = {1};
+            r.strides_ = {1};
+            r.size_ = 1;
+        } else {
+            std::size_t total = 1;
+            for (std::size_t d : r.shape_) total *= d;
+            r.size_ = total;
+        }
+        return r;
+    }
+
     // Reductions — thin wrappers over HPX algorithms, run in place on the buffer.
     // Contiguous path (is_contiguous()): raw pointer range passed to hpx::reduce.
     // Strided path: hpx::experimental::for_loop with reduction object, zero-copy.
