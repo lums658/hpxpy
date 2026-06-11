@@ -523,6 +523,78 @@ public:
         return r;
     }
 
+    // -----------------------------------------------------------------------
+    // N-D axis reductions (stage 5) — reduce over `axes` (already normalized:
+    // non-negative, sorted, unique — done by the binding). Each output cell owns
+    // its accumulator (no shared reduction object): the parallel for_loop runs
+    // over [0, out_size) and each iteration does a serial inner reduction over
+    // the reduced extents. Works on any (contiguous or not) N-D array via strides_.
+    //
+    //   out_shape : reduced axes dropped (keepdims=false) or set to 1 (keepdims=true)
+    //   kept_axes : the surviving axes (their extents form the parallel index space)
+    //   red_axes  : the reduced axes (their extents form the serial inner loop)
+    // Identities: sum 0.0, min +inf, max -inf. Empty (size_==0 or a reduced extent
+    // is 0): min/max throw; sum yields zeros.
+    Array sum_axis(std::vector<std::size_t> axes, bool keepdims) const
+    {
+        return reduce_axis(std::move(axes), keepdims, 0.0,
+            [](double acc, double v) { return acc + v; }, /*throw_empty=*/false);
+    }
+    Array min_axis(std::vector<std::size_t> axes, bool keepdims) const
+    {
+        return reduce_axis(std::move(axes), keepdims,
+            std::numeric_limits<double>::infinity(),
+            [](double acc, double v) { return v < acc ? v : acc; },
+            /*throw_empty=*/true);
+    }
+    Array max_axis(std::vector<std::size_t> axes, bool keepdims) const
+    {
+        return reduce_axis(std::move(axes), keepdims,
+            -std::numeric_limits<double>::infinity(),
+            [](double acc, double v) { return v > acc ? v : acc; },
+            /*throw_empty=*/true);
+    }
+
+    // 2-D matrix multiply: this is (m,k), B is (k2,n) with k==k2 -> C (m,n).
+    // Both operands must be 2-D. Uses BOTH operands' strides_, so transposed /
+    // non-contiguous operands are handled correctly (no copy needed). C is a fresh
+    // contiguous owning Array. NAIVE O(m*n*k); tiled/BLAS optimization is future work.
+    Array matmul(Array const& B) const
+    {
+        if (ndim() != 2 || B.ndim() != 2)
+            throw std::invalid_argument("matmul: both operands must be 2-D");
+        std::size_t m = shape_[0];
+        std::size_t k = shape_[1];
+        std::size_t k2 = B.shape_[0];
+        std::size_t n = B.shape_[1];
+        if (k != k2)
+            throw std::invalid_argument(
+                "matmul: inner dimensions do not match");
+        Array C;
+        C.alloc_nd_({m, n}, m * n, 0.0);
+        if (m * n == 0)
+            return C;
+        double const* a = base_;
+        double const* b = B.base_;
+        double* c = C.base_;
+        std::ptrdiff_t sta0 = strides_[0], sta1 = strides_[1];
+        std::ptrdiff_t stb0 = B.strides_[0], stb1 = B.strides_[1];
+        hpx::experimental::for_loop(hpx::execution::par,
+            std::size_t(0), m * n,
+            [a, b, c, n, k, sta0, sta1, stb0, stb1](std::size_t out) {
+                std::size_t i = out / n;
+                std::size_t j = out % n;
+                double acc = 0.0;
+                for (std::size_t p = 0; p < k; ++p)
+                    acc += a[static_cast<std::ptrdiff_t>(i) * sta0 +
+                             static_cast<std::ptrdiff_t>(p) * sta1] *
+                           b[static_cast<std::ptrdiff_t>(p) * stb0 +
+                             static_cast<std::ptrdiff_t>(j) * stb1];
+                c[out] = acc;
+            });
+        return C;
+    }
+
     // Element-wise binary ops -> a NEW (owning) Array. One hpx::transform pass
     // (contiguous) or for_loop element-wise (strided; result is always contiguous).
     Array add(Array const& o) const { return binary(o, std::plus<double>{}); }
@@ -704,6 +776,86 @@ private:
             }
         }
         return r;
+    }
+
+    // Generic axis-reduction kernel shared by sum_axis/min_axis/max_axis.
+    // `identity` seeds each output cell; `combine(acc, v)` folds an element in.
+    // `throw_empty` is true for min/max (reducing over an empty extent is undefined).
+    template <typename Combine>
+    Array reduce_axis(std::vector<std::size_t> axes, bool keepdims,
+        double identity, Combine combine, bool throw_empty) const
+    {
+        std::size_t nd = shape_.size();
+        // Partition axes into reduced vs kept (axes is sorted/unique/in-range).
+        std::vector<bool> is_red(nd, false);
+        for (std::size_t ax : axes)
+            is_red[ax] = true;
+        std::vector<std::size_t> kept_axes, red_axes;
+        for (std::size_t k = 0; k < nd; ++k)
+            (is_red[k] ? red_axes : kept_axes).push_back(k);
+
+        // out_shape: reduced axes dropped (keepdims=false) or set to 1 (keepdims=true).
+        std::vector<std::size_t> out_shape;
+        for (std::size_t k = 0; k < nd; ++k) {
+            if (is_red[k]) {
+                if (keepdims) out_shape.push_back(1);
+            } else {
+                out_shape.push_back(shape_[k]);
+            }
+        }
+
+        // Extents of the kept (parallel) and reduced (serial inner) index spaces.
+        std::vector<std::size_t> kept_shape, red_shape;
+        std::size_t out_size = 1, red_size = 1;
+        for (std::size_t ax : kept_axes) { kept_shape.push_back(shape_[ax]); out_size *= shape_[ax]; }
+        for (std::size_t ax : red_axes)  { red_shape.push_back(shape_[ax]);  red_size *= shape_[ax]; }
+
+        // Empty reduced extent: min/max are undefined; sum yields the identity (0).
+        if (throw_empty && red_size == 0)
+            throw std::invalid_argument(
+                "axis reduction over an empty axis is undefined (min/max)");
+
+        Array out;
+        out.alloc_nd_(out_shape, out_size, identity);
+        if (out_size == 0 || red_size == 0)
+            return out;    // sum over empty reduced extent => zeros (identity fill)
+
+        double const* b = base_;
+        double* dst = out.base_;
+        auto kept_aux = inner_volumes(kept_shape);
+        auto red_aux = inner_volumes(red_shape);
+        auto const& st = strides_;
+        std::size_t kept_nd = kept_shape.size();
+        std::size_t red_nd = red_shape.size();
+        // for_loop over output cells; each owns its accumulator (no reduction object).
+        hpx::experimental::for_loop(hpx::execution::par,
+            std::size_t(0), out_size,
+            [b, dst, kept_nd, &kept_aux, &kept_axes, red_size, red_nd, &red_aux,
+             &red_axes, &st, identity, combine](std::size_t out_i) {
+                // Unravel out_i over the kept extents -> base offset (strides of kept axes).
+                std::ptrdiff_t base_off = 0;
+                {
+                    std::size_t rem = out_i;
+                    for (std::size_t j = 0; j < kept_nd; ++j) {
+                        std::size_t coord = rem / kept_aux[j];
+                        rem %= kept_aux[j];
+                        base_off += static_cast<std::ptrdiff_t>(coord) * st[kept_axes[j]];
+                    }
+                }
+                double acc = identity;
+                for (std::size_t red_i = 0; red_i < red_size; ++red_i) {
+                    std::ptrdiff_t red_off = 0;
+                    std::size_t rem = red_i;
+                    for (std::size_t r = 0; r < red_nd; ++r) {
+                        std::size_t coord = rem / red_aux[r];
+                        rem %= red_aux[r];
+                        red_off += static_cast<std::ptrdiff_t>(coord) * st[red_axes[r]];
+                    }
+                    acc = combine(acc, b[base_off + red_off]);
+                }
+                dst[out_i] = acc;
+            });
+        return out;
     }
 
     // broadcast_shapes: right-align shapes sa and sb (treat missing leading axes as 1);

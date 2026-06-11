@@ -27,6 +27,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -178,6 +179,43 @@ using np_out = nb::ndarray<nb::numpy, double>;                // any rank out (d
 // (nanobind infers row-major); non-contiguous ones (a[::2], a[::-1], transposed views)
 // pass explicit strides. NOTE: nanobind's typed ndarray takes strides in ELEMENTS (it
 // multiplies by sizeof(T) internally) — passing bytes segfaults on negative strides.
+// Parse an axis argument (int, or tuple/list of ints) into normalized axes:
+// negatives wrapped (+ndim), validated in range, deduplicated, and sorted ascending.
+// `None` is handled by the caller (full reduction -> scalar) and never reaches here.
+// Bad axis -> IndexError; duplicate axis -> ValueError (numpy semantics).
+std::vector<std::size_t> parse_axes(nb::object axis, std::size_t ndim)
+{
+    auto norm_one = [ndim](Py_ssize_t ax) -> std::size_t {
+        Py_ssize_t nd = static_cast<Py_ssize_t>(ndim);
+        if (ax < 0) ax += nd;
+        if (ax < 0 || ax >= nd)
+            throw nb::index_error("axis out of range for array dimensions");
+        return static_cast<std::size_t>(ax);
+    };
+
+    std::vector<std::size_t> raw;
+    if (PyTuple_Check(axis.ptr()) || PyList_Check(axis.ptr())) {
+        nb::sequence seq = nb::cast<nb::sequence>(axis);
+        for (nb::handle item : seq) {
+            Py_ssize_t ax = PyNumber_AsSsize_t(item.ptr(), PyExc_IndexError);
+            if (ax == -1 && PyErr_Occurred()) throw nb::python_error();
+            raw.push_back(norm_one(ax));
+        }
+    } else {
+        Py_ssize_t ax = PyNumber_AsSsize_t(axis.ptr(), PyExc_IndexError);
+        if (ax == -1 && PyErr_Occurred()) throw nb::python_error();
+        raw.push_back(norm_one(ax));
+    }
+
+    // Detect duplicates (after normalization), then sort + unique.
+    std::vector<std::size_t> sorted = raw;
+    std::sort(sorted.begin(), sorted.end());
+    for (std::size_t k = 1; k < sorted.size(); ++k)
+        if (sorted[k] == sorted[k - 1])
+            throw nb::value_error("duplicate value in axis");
+    return sorted;
+}
+
 np_out to_numpy_view(nb::object obj)
 {
     Array& a = nb::cast<Array&>(obj);
@@ -248,22 +286,80 @@ NB_MODULE(_core, m)
                                  PyLong_FromSize_t(a.shape()[k]));
             return t;
         }, "Shape of the array as a tuple of ints (N-D).")
-        .def("sum", [](Array const& a) {
+        // sum/min/max: axis=None (default) -> scalar fast path (zero-penalty,
+        // contiguous hpx::reduce); axis given (int or tuple) -> N-D axis reduction
+        // returning a new Array. keepdims retains the reduced axes as size 1.
+        .def("sum", [](Array const& a, nb::object axis, bool keepdims) -> nb::object {
+            // GIL released around the C++ work; cast back to Python AFTER it is
+            // re-acquired (the release scope ends before the nb::cast).
+            if (axis.is_none()) {
+                double s;
+                { nb::gil_scoped_release release; s = a.sum(); }
+                return nb::cast(s);
+            }
+            auto ax = parse_axes(axis, a.ndim());
+            Array r;
+            { nb::gil_scoped_release release; r = a.sum_axis(ax, keepdims); }
+            return nb::cast(std::move(r));
+        }, "axis"_a = nb::none(), "keepdims"_a = false,
+           "Parallel sum. axis=None -> scalar (hpx::reduce); axis -> reduced Array.")
+        .def("min", [](Array const& a, nb::object axis, bool keepdims) -> nb::object {
+            if (axis.is_none()) {
+                double s;
+                { nb::gil_scoped_release release; s = a.min(); }
+                return nb::cast(s);
+            }
+            auto ax = parse_axes(axis, a.ndim());
+            Array r;
+            { nb::gil_scoped_release release; r = a.min_axis(ax, keepdims); }
+            return nb::cast(std::move(r));
+        }, "axis"_a = nb::none(), "keepdims"_a = false,
+           "Parallel minimum. axis=None -> scalar (empty -> ValueError); axis -> Array.")
+        .def("max", [](Array const& a, nb::object axis, bool keepdims) -> nb::object {
+            if (axis.is_none()) {
+                double s;
+                { nb::gil_scoped_release release; s = a.max(); }
+                return nb::cast(s);
+            }
+            auto ax = parse_axes(axis, a.ndim());
+            Array r;
+            { nb::gil_scoped_release release; r = a.max_axis(ax, keepdims); }
+            return nb::cast(std::move(r));
+        }, "axis"_a = nb::none(), "keepdims"_a = false,
+           "Parallel maximum. axis=None -> scalar (empty -> ValueError); axis -> Array.")
+        // dot: 1-D . 1-D -> scalar (fused transform_reduce); 2-D . 2-D -> matmul Array.
+        .def("dot", [](Array const& a, Array const& b) -> nb::object {
+            if (a.ndim() == 1 && b.ndim() == 1) {
+                double s;
+                { nb::gil_scoped_release release; s = a.dot(b); }
+                return nb::cast(s);
+            }
+            if (a.ndim() == 2 && b.ndim() == 2) {
+                Array r;
+                { nb::gil_scoped_release release; r = a.matmul(b); }
+                return nb::cast(std::move(r));
+            }
+            throw nb::value_error(
+                "dot: only 1-D . 1-D (scalar) and 2-D . 2-D (matmul) are supported");
+        }, "b"_a, "1-D.1-D -> scalar (fused); 2-D.2-D -> matrix product (Array).")
+        .def("matmul", [](Array const& a, Array const& b) {
             nb::gil_scoped_release release;
-            return a.sum();
-        }, "Parallel sum (hpx::reduce).")
-        .def("min", [](Array const& a) {
-            nb::gil_scoped_release release;
-            return a.min();
-        }, "Parallel minimum (empty -> ValueError).")
-        .def("max", [](Array const& a) {
-            nb::gil_scoped_release release;
-            return a.max();
-        }, "Parallel maximum (empty -> ValueError).")
-        .def("dot", [](Array const& a, Array const& b) {
-            nb::gil_scoped_release release;
-            return a.dot(b);
-        }, "b"_a, "Fused dot product (single-pass transform_reduce).")
+            return a.matmul(b);
+        }, "b"_a, "2-D matrix product A @ B (naive O(m*n*k)).")
+        .def("__matmul__", [](Array const& a, Array const& b) -> nb::object {
+            if (a.ndim() == 1 && b.ndim() == 1) {
+                double s;
+                { nb::gil_scoped_release release; s = a.dot(b); }
+                return nb::cast(s);
+            }
+            if (a.ndim() == 2 && b.ndim() == 2) {
+                Array r;
+                { nb::gil_scoped_release release; r = a.matmul(b); }
+                return nb::cast(std::move(r));
+            }
+            throw nb::value_error(
+                "@: only 1-D @ 1-D (scalar) and 2-D @ 2-D (matmul) are supported");
+        })
         .def("copy", [](Array const& a) {
             nb::gil_scoped_release r; return a.copy();
         }, "Deep copy to a new Array (numpy a.copy()).")
