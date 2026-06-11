@@ -176,6 +176,11 @@ using np_out = nb::ndarray<nb::numpy, double, nb::ndim<1>>;
 np_out to_numpy_view(nb::object obj)
 {
     Array& a = nb::cast<Array&>(obj);
+    // The 1-D bridge can't describe a higher-rank shape; rather than hand NumPy a
+    // silently-wrong flat view, refuse until the rank-dynamic bridge lands (N-D stage 2).
+    if (a.ndim() > 1)
+        throw nb::type_error(
+            "to_numpy()/__array__ is 1-D only for now; the N-D NumPy bridge lands next.");
     std::ptrdiff_t s = a.stride();
     if (s == 1) {
         return np_out(a.mutable_data(), {a.size()}, obj);
@@ -234,6 +239,13 @@ NB_MODULE(_core, m)
         .def_prop_ro("size", &Array::size)
         .def_prop_ro("ndim", &Array::ndim)
         .def_prop_ro("stride", &Array::stride)
+        .def_prop_ro("shape", [](Array const& a) {
+            nb::tuple t = nb::steal<nb::tuple>(PyTuple_New((Py_ssize_t) a.shape().size()));
+            for (std::size_t k = 0; k < a.shape().size(); ++k)
+                PyTuple_SET_ITEM(t.ptr(), (Py_ssize_t) k,
+                                 PyLong_FromSize_t(a.shape()[k]));
+            return t;
+        }, "Shape of the array as a tuple of ints (N-D).")
         .def("sum", [](Array const& a) {
             nb::gil_scoped_release release;
             return a.sum();
@@ -316,8 +328,36 @@ NB_MODULE(_core, m)
         })
         // Indexing: a[i] -> float, a[i:j] -> contiguous VIEW (shares memory).
         // a[i:j:k] with k != 1 -> strided VIEW (shares memory, no copy).
+        // a[i,j,...] (tuple of ints, len==ndim) -> multi-index scalar get (N-D).
+        // a[i:j,...] (tuple with a slice) -> NotImplementedError (stage 6).
         // Index/bounds normalization (numpy semantics) lives here; the wrapper is raw.
         .def("__getitem__", [](Array const& a, nb::object key) -> nb::object {
+            // Tuple key: multi-index (all ints) or N-D slice (deferred).
+            if (PyTuple_Check(key.ptr())) {
+                Py_ssize_t tlen = PyTuple_GET_SIZE(key.ptr());
+                // Check if any element is a slice -> deferred stage 6
+                for (Py_ssize_t k = 0; k < tlen; ++k) {
+                    if (PySlice_Check(PyTuple_GET_ITEM(key.ptr(), k)))
+                        throw nb::type_error(
+                            "N-D slice indexing is not yet implemented (stage 6); "
+                            "use integer multi-index a[i, j, ...] for scalar access.");
+                }
+                // All-integer tuple: multi-index scalar get
+                if (tlen != (Py_ssize_t) a.ndim())
+                    throw nb::index_error("index tuple length must equal ndim");
+                std::vector<std::size_t> idx(tlen);
+                for (Py_ssize_t k = 0; k < tlen; ++k) {
+                    Py_ssize_t ix = PyNumber_AsSsize_t(
+                        PyTuple_GET_ITEM(key.ptr(), k), PyExc_IndexError);
+                    if (ix == -1 && PyErr_Occurred()) throw nb::python_error();
+                    Py_ssize_t dim = (Py_ssize_t) a.shape()[k];
+                    if (ix < 0) ix += dim;
+                    if (ix < 0 || ix >= dim)
+                        throw nb::index_error("Array index out of range");
+                    idx[k] = (std::size_t) ix;
+                }
+                return nb::cast(a.getitem(idx));
+            }
             if (PySlice_Check(key.ptr())) {
                 Py_ssize_t start, stop, step;
                 if (PySlice_Unpack(key.ptr(), &start, &stop, &step) < 0)
@@ -340,8 +380,33 @@ NB_MODULE(_core, m)
             if (i < 0 || i >= n)
                 throw nb::index_error("Array index out of range");
             return nb::cast(a.getitem((std::size_t) i));
-        }, "a[i] -> float; a[i:j] -> contiguous view; a[i:j:k] -> strided view (zero-copy).")
+        }, "a[i] -> float; a[i:j] -> contiguous view; a[i:j:k] -> strided view (zero-copy); "
+           "a[i,j,...] (tuple of ints, len==ndim) -> scalar (N-D multi-index).")
         .def("__setitem__", [](Array& a, nb::object key, nb::object value) {
+            // Tuple key: multi-index set (all ints) or N-D slice (deferred).
+            if (PyTuple_Check(key.ptr())) {
+                Py_ssize_t tlen = PyTuple_GET_SIZE(key.ptr());
+                for (Py_ssize_t k = 0; k < tlen; ++k) {
+                    if (PySlice_Check(PyTuple_GET_ITEM(key.ptr(), k)))
+                        throw nb::type_error(
+                            "N-D slice assignment is not yet implemented (stage 6).");
+                }
+                if (tlen != (Py_ssize_t) a.ndim())
+                    throw nb::index_error("index tuple length must equal ndim");
+                std::vector<std::size_t> idx(tlen);
+                for (Py_ssize_t k = 0; k < tlen; ++k) {
+                    Py_ssize_t ix = PyNumber_AsSsize_t(
+                        PyTuple_GET_ITEM(key.ptr(), k), PyExc_IndexError);
+                    if (ix == -1 && PyErr_Occurred()) throw nb::python_error();
+                    Py_ssize_t dim = (Py_ssize_t) a.shape()[k];
+                    if (ix < 0) ix += dim;
+                    if (ix < 0 || ix >= dim)
+                        throw nb::index_error("Array index out of range");
+                    idx[k] = (std::size_t) ix;
+                }
+                a.setitem(idx, nb::cast<double>(value));
+                return;
+            }
             if (PySlice_Check(key.ptr())) {
                 Py_ssize_t start, stop, step;
                 if (PySlice_Unpack(key.ptr(), &start, &stop, &step) < 0)
@@ -373,7 +438,8 @@ NB_MODULE(_core, m)
             if (i < 0 || i >= n)
                 throw nb::index_error("Array index out of range");
             a.setitem((std::size_t) i, nb::cast<double>(value));
-        }, "a[i] = value; a[i:j] = scalar (fill) or Array (copy, contiguous step 1).")
+        }, "a[i] = value; a[i:j] = scalar (fill) or Array (copy, contiguous step 1); "
+           "a[i,j,...] = scalar (N-D multi-index set).")
         .def("to_numpy", &to_numpy_view,
              "Zero-copy NumPy view (writable; shares memory with the Array).")
         .def("__array__", [](nb::object self, nb::args, nb::kwargs) {
@@ -429,9 +495,38 @@ NB_MODULE(_core, m)
     }, "a"_a, "b"_a, "op"_a, "budget"_a = 0.5, "min_reps"_a = 5, "max_reps"_a = 200,
        "C++-timed median-of-times (s) and rep count for an element-wise op.");
 
-    m.def("zeros", &hpxpy::zeros, "n"_a, "Create an Array of n zeros (NUMA-aware).");
-    m.def("full", &hpxpy::full, "n"_a, "value"_a,
-          "Create an Array of n elements set to value (NUMA-aware).");
+    // zeros/full/ones accept either an int (1-D) or a tuple/list of ints (N-D).
+    m.def("zeros", [](nb::object shape_arg) -> Array {
+        if (PyTuple_Check(shape_arg.ptr()) || PyList_Check(shape_arg.ptr())) {
+            nb::sequence seq = nb::cast<nb::sequence>(shape_arg);
+            std::vector<std::size_t> shape;
+            for (nb::handle item : seq)
+                shape.push_back(nb::cast<std::size_t>(item));
+            return hpxpy::zeros_nd(std::move(shape));
+        }
+        return hpxpy::zeros(nb::cast<std::size_t>(shape_arg));
+    }, "shape"_a, "Create an Array of zeros. shape may be an int (1-D) or tuple/list (N-D).");
+    m.def("ones", [](nb::object shape_arg) -> Array {
+        if (PyTuple_Check(shape_arg.ptr()) || PyList_Check(shape_arg.ptr())) {
+            nb::sequence seq = nb::cast<nb::sequence>(shape_arg);
+            std::vector<std::size_t> shape;
+            for (nb::handle item : seq)
+                shape.push_back(nb::cast<std::size_t>(item));
+            return hpxpy::ones_nd(std::move(shape));
+        }
+        return hpxpy::full(nb::cast<std::size_t>(shape_arg), 1.0);
+    }, "shape"_a, "Create an Array of ones. shape may be an int (1-D) or tuple/list (N-D).");
+    m.def("full", [](nb::object shape_arg, double value) -> Array {
+        if (PyTuple_Check(shape_arg.ptr()) || PyList_Check(shape_arg.ptr())) {
+            nb::sequence seq = nb::cast<nb::sequence>(shape_arg);
+            std::vector<std::size_t> shape;
+            for (nb::handle item : seq)
+                shape.push_back(nb::cast<std::size_t>(item));
+            return hpxpy::full_nd(std::move(shape), value);
+        }
+        return hpxpy::full(nb::cast<std::size_t>(shape_arg), value);
+    }, "shape"_a, "value"_a,
+       "Create an Array filled with value. shape may be an int (1-D) or tuple/list (N-D).");
     m.def("arange", &hpxpy::arange, "n"_a,
           "Create an Array [0, 1, ..., n-1] (NUMA-aware parallel first-touch).");
 

@@ -221,6 +221,9 @@ __marimo__/
 _build.log
 env.local.sh
 
+# Claude Code local settings (machine-specific permissions; never commit)
+.claude/settings.local.json
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

@@ -1,8 +1,10 @@
 # HPXPy (rewrite) — Plan & Process
 
-**Status:** ACTIVE. Phase 1 (thin HPX wrapper) complete through the slice/view model —
-see §8. Repo: `github.com/lums658/hpxpy`. Resolved choices are marked inline; the only
-still-open item is DECIDE #4 (dtype scope). Created 2026-06-04; last validated 2026-06-08.
+**Status:** ACTIVE. Phase 1 (thin HPX wrapper, single-locality) complete — M1–M3, slices +
+strided views, and M5 sparse (SpMV/SpMM), all at ~0 abstraction penalty; the NumPy bridge +
+drop-in parity suite landed; **M4a distributed runtime merged** (multi-locality via the TCP
+parcelport). Now in **Phase A (single-node usability)**, starting with N-D arrays — see §8.
+Repo: `github.com/lums658/hpxpy`. Created 2026-06-04; last validated 2026-06-10.
 
 A from-scratch reimplementation of HPXPy: a NumPy-compatible Python array library
 backed by the HPX C++ runtime, built incrementally with correctness + benchmark gates
@@ -256,21 +258,27 @@ defines the local==CI gate so "works locally" == "passes CI".
   scalar broadcast, `sort`/`copy`/`cumsum`/`is_sorted` — all penalty ≈1.0.
 - **Slice/view model.** (done) `a[i]`, `a[i:j]` contiguous memory-sharing views,
   `a[i]=x` (offset in Array; numpy view semantics; `step!=1` deferred → bead `x7i`).
-- **M4 — Distributed.** (not yet filed) multi-locality arrays + collectives; strong/weak
-  scaling. Exit: multi-node penalty/scaling.
-- **M5 — Stencil / SpMV** (not yet filed; NWGraph-relevant). Exit: scaling vs C++ baseline.
+- **M5 — Sparse (SpMV/SpMM).** (done) CSR `CsrMatrix` + `laplacian_1d`; `DenseMatrix`;
+  `spmv`/`spmm` + `A@x` / `A@B`, kernel-timed penalty ≈1.0.
+- **M4a — Distributed runtime.** (done, PR #33) multi-locality via the TCP parcelport (no HPX
+  rebuild); `num_localities`/`locality_id`/`is_console`/`is_worker`/`distributed_sum`
+  (all_reduce); worker-aware startup; 2-locality validated in CI.
 
-**Phase-1 status:** the representative single-locality op set is wrapped with measured
-~0 abstraction penalty vs C++ HPX (M1–M3 + slices done). M4/M5 extend it; then →
+**Phase-1 + NumPy-bridge status:** the single-locality op set is wrapped at measured ~0
+abstraction penalty (M1–M3, slices/strided, M5); the zero-copy NumPy bridge + drop-in parity
+suite landed; the distributed runtime is up. ~302 tests, 100% coverage.
 
-### Phase 2 — NumPy compatibility (separate; starts after Phase 1)
-- **Zero-copy bridge:** `from_numpy` (borrow) + `to_numpy` (zero-copy view; distributed
-  stays partitioned — explicit gather only if ever needed).
-- **NumPy-identical API:** operators, `dot`, broadcasting, dtype rules, slicing, errors.
-- **Drop-in parity suite** (`import hpxpy as np`) — this milestone's gate.
-
-### Later
-- GPU backend; HPyX (task-parallel) interop/merge.
+### Post-Phase-1 roadmap — usability → distributed → GPU
+The next arc targets a NumPy-faithful experience that scales across all resources with no
+performance tax (decentralized HPX; eager/interactive):
+- **Phase A — single-node usability** (current): **N-D arrays** (epic `hpxpy-3ur`, staged) →
+  **dtypes** (float32/int64; resolves DECIDE #4) → eager/deferred behavior + pip-installable
+  wheels. The adoption foundation.
+- **Phase B — distributed data type:** global-view `Array` over `hpx::partitioned_vector` +
+  segmented reductions (transparent partitioning); the M4a runtime is the substrate.
+- **Phase C — GPU + heterogeneity:** device `compute::vector` (Kokkos/CUDA), CPU↔GPU↔node
+  async overlap, DLPack / Array-API interop. Sequencing: **B before C**.
+- **Validation/demos:** example + tutorial notebooks spanning the arc, once the wrapper is solid.
 
 ---
 
@@ -287,10 +295,12 @@ Resolved:
 - **Tracking — RESOLVED: GitHub issues (human source of truth) + beads (agent scheduler
   / dependency graph).** Both; not either/or.
 
-Still open:
-- **DECIDE #3** — CI host: container w/ pinned HPX vs self-hosted Rostam runner.
-- **DECIDE #4** — dtype scope for M1–M3 (float64 only first? add float32/int64 when?).
-- **Setup** — `gh` and `beads` not installed here yet; git consolidation pending.
+Resolved (later):
+- **DECIDE #3 — RESOLVED: self-hosted Rostam runner** (in production: `ci.yml` build-test +
+  build-test-distributed, `bench.yml`, `docs.yml`).
+- **DECIDE #4 — RESOLVED:** float64 first (Phase 1); **float32/int64 in Phase A after N-D**
+  (bead `hpxpy-jqk`).
+- **Setup — DONE:** `gh` + `beads` installed and in use.
 
 ---
 
