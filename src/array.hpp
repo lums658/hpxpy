@@ -19,6 +19,12 @@
 // contiguous fast-path (raw pointer range) is taken unchanged, so contiguous
 // performance is unaffected.
 //
+// N-D view ops (stage 3): transpose/reshape/squeeze/expand_dims — zero-copy when
+// the source is contiguous; non-contiguous reshape copies.
+// N-D compute (stage 3): non-contiguous else-branches use flat_to_offset (an N-D
+// unravel via pre-computed inner_volumes) so every op works on any non-contiguous
+// N-D array. The contiguous fast-path is byte-for-byte unchanged.
+//
 // SPDX-License-Identifier: MIT
 #pragma once
 
@@ -42,6 +48,42 @@ namespace hpxpy {
 
 using numa_alloc = hpx::compute::host::block_allocator<double>;
 using dvec = hpx::compute::vector<double, numa_alloc>;
+
+// ---------------------------------------------------------------------------
+// N-D unravel helpers (used by the non-contiguous compute else-branches).
+//
+// inner_volumes(shape) -> aux[k] = product(shape[k+1..nd-1]), aux[nd-1] = 1.
+// Computed ONCE per operation, before any loop.
+//
+// flat_to_offset(i, shape, strides, aux) -> element offset from base_.
+//   coord_k = (i / aux[k]) % shape[k]  (integer div/mod with the inner volume)
+//   off += coord_k * strides[k]
+// The 1-D degenerate case (aux[0]=1) gives i*strides[0], matching the old branch.
+// ---------------------------------------------------------------------------
+inline std::vector<std::size_t> inner_volumes(std::vector<std::size_t> const& shape)
+{
+    std::size_t nd = shape.size();
+    std::vector<std::size_t> aux(nd, 1);
+    for (std::size_t k = nd; k-- > 1; )
+        aux[k - 1] = aux[k] * shape[k];
+    return aux;
+}
+
+inline std::ptrdiff_t flat_to_offset(std::size_t i,
+    std::vector<std::size_t> const& shape,
+    std::vector<std::ptrdiff_t> const& strides,
+    std::vector<std::size_t> const& aux)
+{
+    std::ptrdiff_t off = 0;
+    std::size_t rem = i;
+    std::size_t nd = shape.size();
+    for (std::size_t k = 0; k < nd; ++k) {
+        std::size_t coord = rem / aux[k];
+        rem %= aux[k];
+        off += static_cast<std::ptrdiff_t>(coord) * strides[k];
+    }
+    return off;
+}
 
 // Run f on an HPX thread, where the allocator's parallel first-touch must execute. If
 // already on an HPX thread (e.g. the diagnostic's hpx_main) run it directly —
@@ -202,6 +244,181 @@ public:
         return r;
     }
 
+    // -----------------------------------------------------------------------
+    // N-D view ops (stage 3) — all zero-copy except non-contiguous reshape.
+    // -----------------------------------------------------------------------
+
+    // transpose(axes): permute shape_/strides_ by axes. empty axes => reverse all.
+    // Returns a zero-copy view sharing owner_/base_.
+    Array transpose(std::vector<std::size_t> axes = {}) const
+    {
+        std::size_t nd = shape_.size();
+        if (axes.empty()) {
+            // Default: reverse all axes.
+            axes.resize(nd);
+            for (std::size_t k = 0; k < nd; ++k)
+                axes[k] = nd - 1 - k;
+        }
+        if (axes.size() != nd)
+            throw std::invalid_argument(
+                "transpose: axes length must equal ndim");
+        // Validate that axes is a permutation of 0..nd-1.
+        std::vector<bool> seen(nd, false);
+        for (std::size_t ax : axes) {
+            if (ax >= nd)
+                throw std::invalid_argument(
+                    "transpose: axis out of range");
+            if (seen[ax])
+                throw std::invalid_argument(
+                    "transpose: duplicate axis");
+            seen[ax] = true;
+        }
+        Array r;
+        r.owner_ = owner_;
+        r.base_  = base_;
+        r.size_  = size_;
+        r.shape_.resize(nd);
+        r.strides_.resize(nd);
+        for (std::size_t k = 0; k < nd; ++k) {
+            r.shape_[k]   = shape_[axes[k]];
+            r.strides_[k] = strides_[axes[k]];
+        }
+        return r;
+    }
+
+    // reshape(new_shape): product must equal size_. If contiguous returns a zero-copy
+    // view with row-major strides for new_shape; otherwise copies first.
+    // A single -1 in new_shape is inferred (must divide size_ evenly).
+    Array reshape(std::vector<std::ptrdiff_t> new_shape_signed) const
+    {
+        // Resolve -1 (at most one).
+        std::size_t infer_idx = std::size_t(-1);
+        std::size_t known_prod = 1;
+        for (std::size_t k = 0; k < new_shape_signed.size(); ++k) {
+            if (new_shape_signed[k] == -1) {
+                if (infer_idx != std::size_t(-1))
+                    throw std::invalid_argument(
+                        "reshape: only one -1 allowed");
+                infer_idx = k;
+            } else if (new_shape_signed[k] < 0) {
+                throw std::invalid_argument(
+                    "reshape: negative dimension other than -1");
+            } else {
+                known_prod *= static_cast<std::size_t>(new_shape_signed[k]);
+            }
+        }
+        std::vector<std::size_t> new_shape(new_shape_signed.size());
+        for (std::size_t k = 0; k < new_shape_signed.size(); ++k) {
+            if (new_shape_signed[k] != -1)
+                new_shape[k] = static_cast<std::size_t>(new_shape_signed[k]);
+        }
+        if (infer_idx != std::size_t(-1)) {
+            if (known_prod == 0 || size_ % known_prod != 0)
+                throw std::invalid_argument(
+                    "reshape: cannot infer dimension (size not divisible)");
+            new_shape[infer_idx] = size_ / known_prod;
+        }
+        // Validate product.
+        std::size_t prod = 1;
+        for (std::size_t d : new_shape) prod *= d;
+        if (prod != size_)
+            throw std::invalid_argument(
+                "reshape: new shape product does not equal size");
+
+        // Compute row-major strides for new_shape.
+        std::size_t nd2 = new_shape.size();
+        std::vector<std::ptrdiff_t> new_strides(nd2);
+        if (nd2 > 0) {
+            new_strides[nd2 - 1] = 1;
+            for (std::size_t k = nd2 - 1; k-- > 0; )
+                new_strides[k] = static_cast<std::ptrdiff_t>(new_shape[k + 1]) * new_strides[k + 1];
+        }
+
+        if (is_contiguous()) {
+            // Zero-copy view.
+            Array r;
+            r.owner_   = owner_;
+            r.base_    = base_;
+            r.size_    = size_;
+            r.shape_   = new_shape;
+            r.strides_ = new_strides;
+            return r;
+        }
+        // Non-contiguous: copy to a fresh contiguous array, then set shape/strides.
+        Array c = copy();
+        c.shape_   = new_shape;
+        c.strides_ = new_strides;
+        return c;
+    }
+
+    // ravel(): flatten to 1-D (reshape to {size_}).
+    Array ravel() const
+    {
+        return reshape({static_cast<std::ptrdiff_t>(size_)});
+    }
+
+    // squeeze(axes): drop size-1 dims. Empty axes => drop ALL size-1 dims.
+    // Named axes must each have size 1.
+    Array squeeze(std::vector<std::size_t> axes = {}) const
+    {
+        std::size_t nd = shape_.size();
+        std::vector<bool> drop(nd, false);
+        if (axes.empty()) {
+            for (std::size_t k = 0; k < nd; ++k)
+                if (shape_[k] == 1) drop[k] = true;
+        } else {
+            for (std::size_t ax : axes) {
+                if (ax >= nd)
+                    throw std::invalid_argument("squeeze: axis out of range");
+                if (shape_[ax] != 1)
+                    throw std::invalid_argument(
+                        "squeeze: cannot squeeze axis with size > 1");
+                drop[ax] = true;
+            }
+        }
+        Array r;
+        r.owner_ = owner_;
+        r.base_  = base_;
+        r.size_  = size_;
+        for (std::size_t k = 0; k < nd; ++k) {
+            if (!drop[k]) {
+                r.shape_.push_back(shape_[k]);
+                r.strides_.push_back(strides_[k]);
+            }
+        }
+        // Edge case: all dims squeezed -> 0-D (treat as 1-D size-1 scalar).
+        if (r.shape_.empty()) {
+            r.shape_   = {1};
+            r.strides_ = {1};
+        }
+        return r;
+    }
+
+    // expand_dims(axis): insert a size-1 dim at position axis (supports nd+1).
+    Array expand_dims(std::size_t axis) const
+    {
+        std::size_t nd = shape_.size();
+        if (axis > nd)
+            throw std::invalid_argument("expand_dims: axis out of range");
+        Array r;
+        r.owner_ = owner_;
+        r.base_  = base_;
+        r.size_  = size_;
+        r.shape_.reserve(nd + 1);
+        r.strides_.reserve(nd + 1);
+        for (std::size_t k = 0; k < axis; ++k) {
+            r.shape_.push_back(shape_[k]);
+            r.strides_.push_back(strides_[k]);
+        }
+        r.shape_.push_back(1);
+        r.strides_.push_back(axis < nd ? strides_[axis] : 1);
+        for (std::size_t k = axis; k < nd; ++k) {
+            r.shape_.push_back(shape_[k]);
+            r.strides_.push_back(strides_[k]);
+        }
+        return r;
+    }
+
     // Reductions — thin wrappers over HPX algorithms, run in place on the buffer.
     // Contiguous path (is_contiguous()): raw pointer range passed to hpx::reduce.
     // Strided path: hpx::experimental::for_loop with reduction object, zero-copy.
@@ -213,10 +430,14 @@ public:
             return hpx::reduce(hpx::execution::par, base_, base_ + size_, 0.0);
         double r = 0.0;
         double* b = base_;
-        std::ptrdiff_t s = strides_[0];
+        auto aux = inner_volumes(shape_);
+        auto const& sh  = shape_;
+        auto const& st  = strides_;
         hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
             hpx::experimental::reduction(r, 0.0, std::plus<double>{}),
-            [b, s](std::size_t i, double& acc) { acc += b[static_cast<std::ptrdiff_t>(i) * s]; });
+            [b, &sh, &st, &aux](std::size_t i, double& acc) {
+                acc += b[flat_to_offset(i, sh, st, aux)];
+            });
         return r;
     }
     double min() const
@@ -229,12 +450,14 @@ public:
                 [](double x, double y) { return x < y ? x : y; });
         double r = std::numeric_limits<double>::infinity();
         double* b = base_;
-        std::ptrdiff_t s = strides_[0];
+        auto aux = inner_volumes(shape_);
+        auto const& sh  = shape_;
+        auto const& st  = strides_;
         hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
             hpx::experimental::reduction(r, std::numeric_limits<double>::infinity(),
                 [](double x, double y) { return x < y ? x : y; }),
-            [b, s](std::size_t i, double& acc) {
-                double v = b[static_cast<std::ptrdiff_t>(i) * s];
+            [b, &sh, &st, &aux](std::size_t i, double& acc) {
+                double v = b[flat_to_offset(i, sh, st, aux)];
                 if (v < acc) acc = v;
             });
         return r;
@@ -249,12 +472,14 @@ public:
                 [](double x, double y) { return x > y ? x : y; });
         double r = -std::numeric_limits<double>::infinity();
         double* b = base_;
-        std::ptrdiff_t s = strides_[0];
+        auto aux = inner_volumes(shape_);
+        auto const& sh  = shape_;
+        auto const& st  = strides_;
         hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
             hpx::experimental::reduction(r, -std::numeric_limits<double>::infinity(),
                 [](double x, double y) { return x > y ? x : y; }),
-            [b, s](std::size_t i, double& acc) {
-                double v = b[static_cast<std::ptrdiff_t>(i) * s];
+            [b, &sh, &st, &aux](std::size_t i, double& acc) {
+                double v = b[flat_to_offset(i, sh, st, aux)];
                 if (v > acc) acc = v;
             });
         return r;
@@ -273,13 +498,17 @@ public:
         double r = 0.0;
         double* ba = base_;
         double* bb = other.base_;
-        std::ptrdiff_t sa = strides_[0];
-        std::ptrdiff_t sb = other.strides_[0];
+        auto auxa = inner_volumes(shape_);
+        auto auxb = inner_volumes(other.shape_);
+        auto const& sha = shape_;
+        auto const& sta = strides_;
+        auto const& shb = other.shape_;
+        auto const& stb = other.strides_;
         hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
             hpx::experimental::reduction(r, 0.0, std::plus<double>{}),
-            [ba, bb, sa, sb](std::size_t i, double& acc) {
-                acc += ba[static_cast<std::ptrdiff_t>(i) * sa] *
-                       bb[static_cast<std::ptrdiff_t>(i) * sb];
+            [ba, bb, &sha, &sta, &auxa, &shb, &stb, &auxb](std::size_t i, double& acc) {
+                acc += ba[flat_to_offset(i, sha, sta, auxa)] *
+                       bb[flat_to_offset(i, shb, stb, auxb)];
             });
         return r;
     }
@@ -299,22 +528,25 @@ public:
     Array div_scalar(double s) const { return unary([s](double x) { return x / s; }); }
     Array rdiv_scalar(double s) const { return unary([s](double x) { return s / x; }); }
 
-    // Deep copy -> a new independent (owning) Array (numpy a.copy()).
+    // Deep copy -> a new independent (owning) contiguous Array (numpy a.copy()).
+    // The result is ALWAYS contiguous row-major with the same shape as *this.
     Array copy() const
     {
         Array r;
-        r.alloc_(size_);
+        r.alloc_nd_(shape_, size_, 0.0);
         if (size_) {
             if (is_contiguous()) {
                 hpx::copy(hpx::execution::par, base_, base_ + size_, r.base_);
             } else {
                 double* src = base_;
                 double* dst = r.base_;
-                std::ptrdiff_t s = strides_[0];
+                auto aux = inner_volumes(shape_);
+                auto const& sh = shape_;
+                auto const& st = strides_;
                 hpx::experimental::for_loop(hpx::execution::par,
                     std::size_t(0), size_,
-                    [src, dst, s](std::size_t i) {
-                        dst[i] = src[static_cast<std::ptrdiff_t>(i) * s];
+                    [src, dst, &sh, &st, &aux](std::size_t i) {
+                        dst[i] = src[flat_to_offset(i, sh, st, aux)];
                     });
             }
         }
@@ -330,15 +562,17 @@ public:
         if (is_contiguous()) {
             hpx::sort(hpx::execution::par, base_, base_ + size_);
         } else {
-            // Gather strided elements into a temporary contiguous dvec, sort, scatter.
+            // Gather non-contiguous elements into a temp buffer, sort, scatter back.
             double* src = base_;
-            std::ptrdiff_t s = strides_[0];
+            auto aux = inner_volumes(shape_);
+            auto const& sh = shape_;
+            auto const& st = strides_;
             std::vector<double> tmp(size_);
             for (std::size_t i = 0; i < size_; ++i)
-                tmp[i] = src[static_cast<std::ptrdiff_t>(i) * s];
+                tmp[i] = src[flat_to_offset(i, sh, st, aux)];
             hpx::sort(hpx::execution::par, tmp.begin(), tmp.end());
             for (std::size_t i = 0; i < size_; ++i)
-                src[static_cast<std::ptrdiff_t>(i) * s] = tmp[i];
+                src[flat_to_offset(i, sh, st, aux)] = tmp[i];
         }
     }
     bool is_sorted() const
@@ -347,16 +581,17 @@ public:
             return true;
         if (is_contiguous())
             return hpx::is_sorted(hpx::execution::par, base_, base_ + size_);
-        // Strided: one zero-copy pass — AND-reduce "each logical element <= its
-        // successor" over the n-1 adjacent pairs (no gather).
+        // Non-contiguous N-D: AND-reduce over adjacent flat-index pairs.
         bool ok = true;
         double* b = base_;
-        std::ptrdiff_t s = strides_[0];
+        auto aux = inner_volumes(shape_);
+        auto const& sh = shape_;
+        auto const& st = strides_;
         hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_ - 1,
             hpx::experimental::reduction(ok, true, std::logical_and<bool>{}),
-            [b, s](std::size_t i, bool& acc) {
-                acc = acc && (b[static_cast<std::ptrdiff_t>(i) * s] <=
-                              b[(static_cast<std::ptrdiff_t>(i) + 1) * s]);
+            [b, &sh, &st, &aux](std::size_t i, bool& acc) {
+                acc = acc && (b[flat_to_offset(i,     sh, st, aux)] <=
+                              b[flat_to_offset(i + 1, sh, st, aux)]);
             });
         return ok;
     }
@@ -373,12 +608,14 @@ public:
             } else {
                 double* src = base_;
                 double* dst = r.base_;
-                std::ptrdiff_t s = strides_[0];
-                // Gather strided into contiguous result, then scan in place.
+                auto aux = inner_volumes(shape_);
+                auto const& sh = shape_;
+                auto const& st = strides_;
+                // Gather non-contiguous elements into result, then scan in place.
                 hpx::experimental::for_loop(hpx::execution::par,
                     std::size_t(0), size_,
-                    [src, dst, s](std::size_t i) {
-                        dst[i] = src[static_cast<std::ptrdiff_t>(i) * s];
+                    [src, dst, &sh, &st, &aux](std::size_t i) {
+                        dst[i] = src[flat_to_offset(i, sh, st, aux)];
                     });
                 hpx::inclusive_scan(hpx::execution::par, dst, dst + size_, dst);
             }
@@ -439,18 +676,20 @@ private:
     Array unary(Op op) const
     {
         Array r;
-        r.alloc_(size_);
+        r.alloc_nd_(shape_, size_, 0.0);
         if (size_) {
             if (is_contiguous()) {
                 hpx::transform(hpx::execution::par, base_, base_ + size_, r.base_, op);
             } else {
                 double* src = base_;
                 double* dst = r.base_;
-                std::ptrdiff_t s = strides_[0];
+                auto aux = inner_volumes(shape_);
+                auto const& sh = shape_;
+                auto const& st = strides_;
                 hpx::experimental::for_loop(hpx::execution::par,
                     std::size_t(0), size_,
-                    [src, dst, s, op](std::size_t i) {
-                        dst[i] = op(src[static_cast<std::ptrdiff_t>(i) * s]);
+                    [src, dst, &sh, &st, &aux, op](std::size_t i) {
+                        dst[i] = op(src[flat_to_offset(i, sh, st, aux)]);
                     });
             }
         }
@@ -460,10 +699,17 @@ private:
     template <typename Op>
     Array binary(Array const& o, Op op) const
     {
-        if (size_ != o.size_)
-            throw std::invalid_argument("element-wise op: size mismatch");
+        // For N-D arrays require matching shape (no broadcasting in stage 3).
+        if (shape_.size() > 1 || o.shape_.size() > 1) {
+            if (shape_ != o.shape_)
+                throw std::invalid_argument(
+                    "element-wise op: shape mismatch (broadcasting not supported until stage 4)");
+        } else {
+            if (size_ != o.size_)
+                throw std::invalid_argument("element-wise op: size mismatch");
+        }
         Array r;
-        r.alloc_(size_);
+        r.alloc_nd_(shape_, size_, 0.0);
         if (size_) {
             if (is_contiguous() && o.is_contiguous()) {
                 hpx::transform(
@@ -472,13 +718,17 @@ private:
                 double* ba = base_;
                 double* bb = o.base_;
                 double* dst = r.base_;
-                std::ptrdiff_t sa = strides_[0];
-                std::ptrdiff_t sb = o.strides_[0];
+                auto auxa = inner_volumes(shape_);
+                auto auxb = inner_volumes(o.shape_);
+                auto const& sha = shape_;
+                auto const& sta = strides_;
+                auto const& shb = o.shape_;
+                auto const& stb = o.strides_;
                 hpx::experimental::for_loop(hpx::execution::par,
                     std::size_t(0), size_,
-                    [ba, bb, dst, sa, sb, op](std::size_t i) {
-                        dst[i] = op(ba[static_cast<std::ptrdiff_t>(i) * sa],
-                                    bb[static_cast<std::ptrdiff_t>(i) * sb]);
+                    [ba, bb, dst, &sha, &sta, &auxa, &shb, &stb, &auxb, op](std::size_t i) {
+                        dst[i] = op(ba[flat_to_offset(i, sha, sta, auxa)],
+                                    bb[flat_to_offset(i, shb, stb, auxb)]);
                     });
             }
         }
