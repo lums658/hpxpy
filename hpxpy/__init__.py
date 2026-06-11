@@ -86,32 +86,50 @@ def distributed_sum(local: float) -> float:
     return _core.distributed_sum(float(local))
 
 
-def sum(a: Array) -> float:  # noqa: A001 - NumPy-style namespace
+def sum(a: Array, axis=None, keepdims: bool = False):  # noqa: A001 - NumPy-style namespace
     """Parallel sum of an :class:`Array` (in-place ``hpx::reduce``, no copy).
 
     NumPy-style alias for :meth:`Array.sum` (``hpx.sum(a)`` ≡ ``a.sum()``); a
-    single kernel lives in C++.
+    single kernel lives in C++. ``axis=None`` (default) returns a scalar; an ``int``
+    or tuple of ints reduces those axes and returns a new :class:`Array`.
     """
-    return a.sum()
+    return a.sum(axis, keepdims)
 
 
-def min(a: Array) -> float:  # noqa: A001 - NumPy-style namespace
-    """Parallel minimum of an :class:`Array` (empty raises ``ValueError``)."""
-    return a.min()
+def min(a: Array, axis=None, keepdims: bool = False):  # noqa: A001 - NumPy-style namespace
+    """Parallel minimum of an :class:`Array` (empty raises ``ValueError``).
+
+    ``axis=None`` (default) returns a scalar; an ``int`` or tuple reduces those axes
+    to a new :class:`Array` (reducing an empty axis raises ``ValueError``).
+    """
+    return a.min(axis, keepdims)
 
 
-def max(a: Array) -> float:  # noqa: A001 - NumPy-style namespace
-    """Parallel maximum of an :class:`Array` (empty raises ``ValueError``)."""
-    return a.max()
+def max(a: Array, axis=None, keepdims: bool = False):  # noqa: A001 - NumPy-style namespace
+    """Parallel maximum of an :class:`Array` (empty raises ``ValueError``).
+
+    ``axis=None`` (default) returns a scalar; an ``int`` or tuple reduces those axes
+    to a new :class:`Array` (reducing an empty axis raises ``ValueError``).
+    """
+    return a.max(axis, keepdims)
 
 
-def dot(a: Array, b: Array) -> float:
-    """Fused dot product of two :class:`Array` (single-pass ``transform_reduce``).
+def dot(a: Array, b: Array):
+    """Dot product / matrix product of two :class:`Array`.
 
-    NumPy-style alias for :meth:`Array.dot` (``hpx.dot(a, b)`` ≡ ``a.dot(b)``);
-    one kernel in C++. Mismatched sizes raise ``ValueError``.
+    NumPy-style alias for :meth:`Array.dot` (``hpx.dot(a, b)`` ≡ ``a.dot(b)``); one
+    kernel in C++. 1-D · 1-D returns a scalar (fused ``transform_reduce``); 2-D · 2-D
+    returns a new :class:`Array` (matrix product). Other ranks raise ``ValueError``.
     """
     return a.dot(b)
+
+
+def matmul(a: Array, b: Array) -> Array:
+    """2-D matrix product ``A @ B`` of two :class:`Array` (``a.matmul(b)``).
+
+    Both operands must be 2-D with matching inner dimension; otherwise ``ValueError``.
+    """
+    return a.matmul(b)
 
 
 def sort(a: Array) -> Array:
@@ -258,6 +276,7 @@ __all__ = [
     "min",
     "max",
     "dot",
+    "matmul",
     "sort",
     "cumsum",
     "transpose",
