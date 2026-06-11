@@ -1,8 +1,8 @@
 """hpxpy — Python arrays backed by the HPX C++ runtime.
 
 Phase 1: a thin wrapper over HPX — a NUMA-aware :class:`Array` (constructors
-``zeros``/``full``/``arange``) and HPX reductions (``sum``/``min``/``max``), with
-no NumPy in the data path. NumPy compatibility is a separate, later phase (see
+``zeros``/``ones``/``full``/``arange``) and HPX reductions (``sum``/``min``/``max``),
+with no NumPy in the data path. NumPy compatibility is a separate, later phase (see
 docs/PLAN.md).
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import atexit
 
 from . import _core
 
-#: The core 1-D float64 array type, backed by a NUMA-aware HPX compute::vector.
+#: The core float64 array type, backed by a NUMA-aware HPX compute::vector.
 Array = _core.Array
 
 #: A CSR (compressed sparse row) float64 matrix (see :func:`csr_from`, :func:`laplacian_1d`).
@@ -175,14 +175,37 @@ def to_numpy(a: Array):
     return _core.to_numpy(a)
 
 
-def zeros(n: int) -> Array:
-    """Create an :class:`Array` of ``n`` zeros (NUMA-aware HPX allocation)."""
-    return _core.zeros(int(n))
+def zeros(shape) -> Array:
+    """Create an :class:`Array` of zeros (NUMA-aware HPX allocation).
+
+    ``shape`` may be an ``int`` (1-D, backward-compatible) or a ``tuple``/``list``
+    of ints (N-D, row-major C-order).
+    """
+    if isinstance(shape, (tuple, list)):
+        return _core.zeros(shape)
+    return _core.zeros(int(shape))
 
 
-def full(n: int, value: float) -> Array:
-    """Create an :class:`Array` of ``n`` elements set to ``value`` (NUMA-aware)."""
-    return _core.full(int(n), float(value))
+def ones(shape) -> Array:
+    """Create an :class:`Array` of ones (NUMA-aware HPX allocation).
+
+    ``shape`` may be an ``int`` (1-D) or a ``tuple``/``list`` of ints (N-D,
+    row-major C-order).
+    """
+    if isinstance(shape, (tuple, list)):
+        return _core.ones(shape)
+    return _core.ones(int(shape))
+
+
+def full(shape, value: float) -> Array:
+    """Create an :class:`Array` filled with ``value`` (NUMA-aware).
+
+    ``shape`` may be an ``int`` (1-D, backward-compatible) or a ``tuple``/``list``
+    of ints (N-D, row-major C-order).
+    """
+    if isinstance(shape, (tuple, list)):
+        return _core.full(shape, float(value))
+    return _core.full(int(shape), float(value))
 
 
 def arange(n: int) -> Array:
@@ -205,6 +228,7 @@ __all__ = [
     "finalize",
     "Array",
     "zeros",
+    "ones",
     "full",
     "arange",
     "sum",
