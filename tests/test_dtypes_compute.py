@@ -5,10 +5,10 @@ the scalar ops, and the broadcast path — now work for float32 and int64 (not
 just float64), via a per-dtype dispatch over the element type T. NumPy is the
 oracle throughout.
 
-Still guarded to non-float64 (deferred to later A2.x stages): the axis
-reductions, matmul, copy, sort/is_sorted, cumsum. int64 true-division is
-guarded (would silently floor); a non-integral float scalar on an int64 array
-raises (no automatic int<->float promotion yet).
+The remaining kernels (axis reductions, matmul, copy, sort/is_sorted, cumsum,
+1-D slice assignment) became dtype-generic in A2.3 (see test_dtypes_rest.py).
+int64 true-division is still guarded (would silently floor); a non-integral
+float scalar on an int64 array raises (no automatic int<->float promotion yet).
 """
 import numpy as np
 import pytest

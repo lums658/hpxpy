@@ -238,24 +238,32 @@ public:
 
     // Slice assignment a[start:start+n] = ... (contiguous; binding computes start/n).
     // fill_range broadcasts a scalar; assign_range copies an Array of length n in.
-    // float64-only for now (the dtype compute stage generalizes these).
+    // dtype-aware: the scalar is cast to the array's element type T (for int64 a
+    // non-integral float scalar TRUNCATES — numpy a[i:j]=2.5 stores 2, consistent
+    // with A2.1 setitem); assign_range requires the rhs share this array's dtype.
     void fill_range(std::size_t start, std::size_t n, double v)
     {
-        require_f64_("slice assignment");
-        if (n) {
-            double* b = data_as<double>();
-            hpx::fill(hpx::execution::par, b + start, b + start + n, v);
-        }
+        if (n)
+            dispatch_dtype(dt_, [&](auto tag) {
+                using T = decltype(tag);
+                T* b = data_as<T>();
+                hpx::fill(hpx::execution::par, b + start, b + start + n,
+                    static_cast<T>(v));
+            });
     }
     void assign_range(std::size_t start, Array const& rhs)
     {
-        require_f64_("slice assignment");
-        rhs.require_f64_("slice assignment");
-        if (rhs.size_) {
-            double const* r = rhs.data_as<double>();
-            hpx::copy(hpx::execution::par, r, r + rhs.size_,
-                data_as<double>() + start);
-        }
+        if (dt_ != rhs.dt_)
+            throw std::invalid_argument(
+                "slice assignment operands have different dtypes; cast explicitly "
+                "with .astype() — automatic type promotion is not yet supported");
+        if (rhs.size_)
+            dispatch_dtype(dt_, [&](auto tag) {
+                using T = decltype(tag);
+                T const* r = rhs.data_as<T>();
+                hpx::copy(hpx::execution::par, r, r + rhs.size_,
+                    data_as<T>() + start);
+            });
     }
 
     // Contiguous view [start, start+n) sharing this array's buffer (numpy a[i:j]).
@@ -426,7 +434,7 @@ public:
             return r;
         }
         // Non-contiguous: copy to a fresh contiguous array, then set shape/strides.
-        // (copy() is float64-only for now; non-contiguous non-f64 reshape will raise.)
+        // (copy() is dtype-generic, so non-contiguous reshape works for any dtype.)
         Array c = copy();
         c.shape_   = new_shape;
         c.strides_ = new_strides;
@@ -686,25 +694,29 @@ public:
     //   out_shape : reduced axes dropped (keepdims=false) or set to 1 (keepdims=true)
     //   kept_axes : the surviving axes (their extents form the parallel index space)
     //   red_axes  : the reduced axes (their extents form the serial inner loop)
-    // Identities: sum 0.0, min +inf, max -inf. Empty (size_==0 or a reduced extent
-    // is 0): min/max throw; sum yields zeros.
+    // Identities (per element type T, supplied to reduce_axis as a generic callable
+    // identity(T{}) -> T): sum T(0); min std::numeric_limits<T>::max(); max
+    // std::numeric_limits<T>::lowest() (these work for float AND integer T — the
+    // integer trap is that ±infinity() is 0 for integral types, corrupting min/max).
+    // Empty (size_==0 or a reduced extent is 0): min/max throw; sum yields zeros.
     Array sum_axis(std::vector<std::size_t> axes, bool keepdims) const
     {
-        return reduce_axis(std::move(axes), keepdims, 0.0,
-            [](double acc, double v) { return acc + v; }, /*throw_empty=*/false);
+        return reduce_axis(std::move(axes), keepdims,
+            [](auto t) { using T = decltype(t); return T(0); },
+            [](auto acc, auto v) { return acc + v; }, /*throw_empty=*/false);
     }
     Array min_axis(std::vector<std::size_t> axes, bool keepdims) const
     {
         return reduce_axis(std::move(axes), keepdims,
-            std::numeric_limits<double>::infinity(),
-            [](double acc, double v) { return v < acc ? v : acc; },
+            [](auto t) { using T = decltype(t); return std::numeric_limits<T>::max(); },
+            [](auto acc, auto v) { return v < acc ? v : acc; },
             /*throw_empty=*/true);
     }
     Array max_axis(std::vector<std::size_t> axes, bool keepdims) const
     {
         return reduce_axis(std::move(axes), keepdims,
-            -std::numeric_limits<double>::infinity(),
-            [](double acc, double v) { return v > acc ? v : acc; },
+            [](auto t) { using T = decltype(t); return std::numeric_limits<T>::lowest(); },
+            [](auto acc, auto v) { return v > acc ? v : acc; },
             /*throw_empty=*/true);
     }
 
@@ -714,8 +726,12 @@ public:
     // contiguous owning Array. NAIVE O(m*n*k); tiled/BLAS optimization is future work.
     Array matmul(Array const& B) const
     {
-        require_f64_("matmul");
-        B.require_f64_("matmul");
+        // Same-dtype rule (no promotion yet, like binary()); result dtype = operand
+        // dtype. int64 matmul accumulates in int64 and wraps on overflow (numpy-faithful).
+        if (dt_ != B.dt_)
+            throw std::invalid_argument(
+                "matmul operands have different dtypes; cast explicitly with "
+                ".astype() — automatic type promotion is not yet supported");
         if (ndim() != 2 || B.ndim() != 2)
             throw std::invalid_argument("matmul: both operands must be 2-D");
         std::size_t m = shape_[0];
@@ -726,27 +742,30 @@ public:
             throw std::invalid_argument(
                 "matmul: inner dimensions do not match");
         Array C;
-        C.alloc_nd_({m, n}, m * n, 0.0, DType::F64);
+        C.alloc_nd_({m, n}, m * n, 0.0, dt_);
         if (m * n == 0)
             return C;
-        double const* a = data_as<double>();
-        double const* b = B.data_as<double>();
-        double* c = C.data_as<double>();
         std::ptrdiff_t sta0 = strides_[0], sta1 = strides_[1];
         std::ptrdiff_t stb0 = B.strides_[0], stb1 = B.strides_[1];
-        hpx::experimental::for_loop(hpx::execution::par,
-            std::size_t(0), m * n,
-            [a, b, c, n, k, sta0, sta1, stb0, stb1](std::size_t out) {
-                std::size_t i = out / n;
-                std::size_t j = out % n;
-                double acc = 0.0;
-                for (std::size_t p = 0; p < k; ++p)
-                    acc += a[static_cast<std::ptrdiff_t>(i) * sta0 +
-                             static_cast<std::ptrdiff_t>(p) * sta1] *
-                           b[static_cast<std::ptrdiff_t>(p) * stb0 +
-                             static_cast<std::ptrdiff_t>(j) * stb1];
-                c[out] = acc;
-            });
+        dispatch_dtype(dt_, [&](auto tag) {
+            using T = decltype(tag);
+            T const* a = data_as<T>();
+            T const* b = B.data_as<T>();
+            T* c = C.data_as<T>();
+            hpx::experimental::for_loop(hpx::execution::par,
+                std::size_t(0), m * n,
+                [a, b, c, n, k, sta0, sta1, stb0, stb1](std::size_t out) {
+                    std::size_t i = out / n;
+                    std::size_t j = out % n;
+                    T acc = T(0);
+                    for (std::size_t p = 0; p < k; ++p)
+                        acc += a[static_cast<std::ptrdiff_t>(i) * sta0 +
+                                 static_cast<std::ptrdiff_t>(p) * sta1] *
+                               b[static_cast<std::ptrdiff_t>(p) * stb0 +
+                                 static_cast<std::ptrdiff_t>(j) * stb1];
+                    c[out] = acc;
+                });
+        });
         return C;
     }
 
@@ -791,26 +810,28 @@ public:
     // The result is ALWAYS contiguous row-major with the same shape as *this.
     Array copy() const
     {
-        require_f64_("copy");
         Array r;
-        r.alloc_nd_(shape_, size_, 0.0, DType::F64);
+        r.alloc_nd_(shape_, size_, 0.0, dt_);
         if (size_) {
-            double* base_ = data_as<double>();
-            if (is_contiguous()) {
-                hpx::copy(hpx::execution::par, base_, base_ + size_,
-                    r.data_as<double>());
-            } else {
-                double* src = base_;
-                double* dst = r.data_as<double>();
-                auto aux = inner_volumes(shape_);
-                auto const& sh = shape_;
-                auto const& st = strides_;
-                hpx::experimental::for_loop(hpx::execution::par,
-                    std::size_t(0), size_,
-                    [src, dst, &sh, &st, &aux](std::size_t i) {
-                        dst[i] = src[flat_to_offset(i, sh, st, aux)];
-                    });
-            }
+            dispatch_dtype(dt_, [&](auto tag) {
+                using T = decltype(tag);
+                T* base_ = data_as<T>();
+                if (is_contiguous()) {
+                    hpx::copy(hpx::execution::par, base_, base_ + size_,
+                        r.template data_as<T>());
+                } else {
+                    T* src = base_;
+                    T* dst = r.template data_as<T>();
+                    auto aux = inner_volumes(shape_);
+                    auto const& sh = shape_;
+                    auto const& st = strides_;
+                    hpx::experimental::for_loop(hpx::execution::par,
+                        std::size_t(0), size_,
+                        [src, dst, &sh, &st, &aux](std::size_t i) {
+                            dst[i] = src[flat_to_offset(i, sh, st, aux)];
+                        });
+                }
+            });
         }
         return r;
     }
@@ -819,75 +840,81 @@ public:
     // Strided: gather into a temporary contiguous buffer, sort, scatter back.
     void sort()
     {
-        require_f64_("sort");
         if (size_ < 2)
             return;
-        double* base_ = data_as<double>();
-        if (is_contiguous()) {
-            hpx::sort(hpx::execution::par, base_, base_ + size_);
-        } else {
-            // Gather non-contiguous elements into a temp buffer, sort, scatter back.
-            double* src = base_;
-            auto aux = inner_volumes(shape_);
-            auto const& sh = shape_;
-            auto const& st = strides_;
-            std::vector<double> tmp(size_);
-            for (std::size_t i = 0; i < size_; ++i)
-                tmp[i] = src[flat_to_offset(i, sh, st, aux)];
-            hpx::sort(hpx::execution::par, tmp.begin(), tmp.end());
-            for (std::size_t i = 0; i < size_; ++i)
-                src[flat_to_offset(i, sh, st, aux)] = tmp[i];
-        }
+        dispatch_dtype(dt_, [&](auto tag) {
+            using T = decltype(tag);
+            T* base_ = data_as<T>();
+            if (is_contiguous()) {
+                hpx::sort(hpx::execution::par, base_, base_ + size_);
+            } else {
+                // Gather non-contiguous elements into a temp buffer, sort, scatter back.
+                T* src = base_;
+                auto aux = inner_volumes(shape_);
+                auto const& sh = shape_;
+                auto const& st = strides_;
+                std::vector<T> tmp(size_);
+                for (std::size_t i = 0; i < size_; ++i)
+                    tmp[i] = src[flat_to_offset(i, sh, st, aux)];
+                hpx::sort(hpx::execution::par, tmp.begin(), tmp.end());
+                for (std::size_t i = 0; i < size_; ++i)
+                    src[flat_to_offset(i, sh, st, aux)] = tmp[i];
+            }
+        });
     }
     bool is_sorted() const
     {
-        require_f64_("is_sorted");
         if (size_ < 2)
             return true;
-        double* base_ = data_as<double>();
-        if (is_contiguous())
-            return hpx::is_sorted(hpx::execution::par, base_, base_ + size_);
-        // Non-contiguous N-D: AND-reduce over adjacent flat-index pairs.
-        bool ok = true;
-        double* b = base_;
-        auto aux = inner_volumes(shape_);
-        auto const& sh = shape_;
-        auto const& st = strides_;
-        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_ - 1,
-            hpx::experimental::reduction(ok, true, std::logical_and<bool>{}),
-            [b, &sh, &st, &aux](std::size_t i, bool& acc) {
-                acc = acc && (b[flat_to_offset(i,     sh, st, aux)] <=
-                              b[flat_to_offset(i + 1, sh, st, aux)]);
-            });
-        return ok;
+        return dispatch_dtype(dt_, [&](auto tag) -> bool {
+            using T = decltype(tag);
+            T* base_ = data_as<T>();
+            if (is_contiguous())
+                return hpx::is_sorted(hpx::execution::par, base_, base_ + size_);
+            // Non-contiguous N-D: AND-reduce over adjacent flat-index pairs.
+            bool ok = true;
+            T* b = base_;
+            auto aux = inner_volumes(shape_);
+            auto const& sh = shape_;
+            auto const& st = strides_;
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_ - 1,
+                hpx::experimental::reduction(ok, true, std::logical_and<bool>{}),
+                [b, &sh, &st, &aux](std::size_t i, bool& acc) {
+                    acc = acc && (b[flat_to_offset(i,     sh, st, aux)] <=
+                                  b[flat_to_offset(i + 1, sh, st, aux)]);
+                });
+            return ok;
+        });
     }
 
     // Inclusive prefix sum -> a NEW (owning) Array (numpy a.cumsum()).
     // Strided: gather into the result buffer then do the scan in place.
     Array cumsum() const
     {
-        require_f64_("cumsum");
         Array r;
-        r.alloc_(size_, 0.0, DType::F64);
+        r.alloc_(size_, 0.0, dt_);
         if (size_) {
-            double* base_ = data_as<double>();
-            if (is_contiguous()) {
-                hpx::inclusive_scan(hpx::execution::par, base_, base_ + size_,
-                    r.data_as<double>());
-            } else {
-                double* src = base_;
-                double* dst = r.data_as<double>();
-                auto aux = inner_volumes(shape_);
-                auto const& sh = shape_;
-                auto const& st = strides_;
-                // Gather non-contiguous elements into result, then scan in place.
-                hpx::experimental::for_loop(hpx::execution::par,
-                    std::size_t(0), size_,
-                    [src, dst, &sh, &st, &aux](std::size_t i) {
-                        dst[i] = src[flat_to_offset(i, sh, st, aux)];
-                    });
-                hpx::inclusive_scan(hpx::execution::par, dst, dst + size_, dst);
-            }
+            dispatch_dtype(dt_, [&](auto tag) {
+                using T = decltype(tag);
+                T* base_ = data_as<T>();
+                if (is_contiguous()) {
+                    hpx::inclusive_scan(hpx::execution::par, base_, base_ + size_,
+                        r.template data_as<T>());
+                } else {
+                    T* src = base_;
+                    T* dst = r.template data_as<T>();
+                    auto aux = inner_volumes(shape_);
+                    auto const& sh = shape_;
+                    auto const& st = strides_;
+                    // Gather non-contiguous elements into result, then scan in place.
+                    hpx::experimental::for_loop(hpx::execution::par,
+                        std::size_t(0), size_,
+                        [src, dst, &sh, &st, &aux](std::size_t i) {
+                            dst[i] = src[flat_to_offset(i, sh, st, aux)];
+                        });
+                    hpx::inclusive_scan(hpx::execution::par, dst, dst + size_, dst);
+                }
+            });
         }
         return r;
     }
@@ -946,16 +973,8 @@ public:
     }
 
 private:
-    // Raise when an element-reading compute kernel is invoked on a non-float64 array.
-    // (float32/int64 compute lands in the next dtype stage A2.2; here only the
-    // float64 numeric paths are wired, so guarding avoids silent-wrong results.)
-    void require_f64_(const char* op) const
-    {
-        if (dt_ != DType::F64)
-            throw std::runtime_error(std::string(op) +
-                ": float32/int64 compute lands in the next dtype stage; "
-                "only float64 is supported here");
-    }
+    // (A2.3 removed require_f64_: every compute kernel is now dtype-generic over T.
+    // The one remaining dtype guard is require_float_ below, for int64 true-division.)
 
     // Reject integer dtypes for ops that are float-only for now (true division —
     // integer true-division would floor; numpy promotes to float64; deferred to A2.3).
@@ -1073,13 +1092,16 @@ private:
     }
 
     // Generic axis-reduction kernel shared by sum_axis/min_axis/max_axis.
-    // `identity` seeds each output cell; `combine(acc, v)` folds an element in.
-    // `throw_empty` is true for min/max (reducing over an empty extent is undefined).
-    template <typename Combine>
+    // `make_identity` is a generic callable make_identity(T{}) -> T seeding each output
+    // cell at the element type T (so min/max use std::numeric_limits<T>, not a ±inf
+    // double that is 0 for integers). `combine(acc, v)` folds an element in (generic
+    // over T). `throw_empty` is true for min/max (reducing an empty extent is undefined).
+    // Result dtype = this array's dtype. The F64 arm is byte-identical to the prior
+    // float64-only kernel.
+    template <typename MakeIdentity, typename Combine>
     Array reduce_axis(std::vector<std::size_t> axes, bool keepdims,
-        double identity, Combine combine, bool throw_empty) const
+        MakeIdentity make_identity, Combine combine, bool throw_empty) const
     {
-        require_f64_("axis reduction");
         std::size_t nd = shape_.size();
         // Partition axes into reduced vs kept (axes is sorted/unique/in-range).
         std::vector<bool> is_red(nd, false);
@@ -1110,47 +1132,51 @@ private:
             throw std::invalid_argument(
                 "axis reduction over an empty axis is undefined (min/max)");
 
-        Array out;
-        out.alloc_nd_(out_shape, out_size, identity, DType::F64);
-        if (out_size == 0 || red_size == 0)
-            return out;    // sum over empty reduced extent => zeros (identity fill)
+        return dispatch_dtype(dt_, [&](auto tag) -> Array {
+            using T = decltype(tag);
+            T identity = make_identity(T{});
+            Array out;
+            out.alloc_nd_(out_shape, out_size, static_cast<double>(identity), dt_);
+            if (out_size == 0 || red_size == 0)
+                return out;    // sum over empty reduced extent => zeros (identity fill)
 
-        double const* b = data_as<double>();
-        double* dst = out.data_as<double>();
-        auto kept_aux = inner_volumes(kept_shape);
-        auto red_aux = inner_volumes(red_shape);
-        auto const& st = strides_;
-        std::size_t kept_nd = kept_shape.size();
-        std::size_t red_nd = red_shape.size();
-        // for_loop over output cells; each owns its accumulator (no reduction object).
-        hpx::experimental::for_loop(hpx::execution::par,
-            std::size_t(0), out_size,
-            [b, dst, kept_nd, &kept_aux, &kept_axes, red_size, red_nd, &red_aux,
-             &red_axes, &st, identity, combine](std::size_t out_i) {
-                // Unravel out_i over the kept extents -> base offset (strides of kept axes).
-                std::ptrdiff_t base_off = 0;
-                {
-                    std::size_t rem = out_i;
-                    for (std::size_t j = 0; j < kept_nd; ++j) {
-                        std::size_t coord = rem / kept_aux[j];
-                        rem %= kept_aux[j];
-                        base_off += static_cast<std::ptrdiff_t>(coord) * st[kept_axes[j]];
+            T const* b = data_as<T>();
+            T* dst = out.template data_as<T>();
+            auto kept_aux = inner_volumes(kept_shape);
+            auto red_aux = inner_volumes(red_shape);
+            auto const& st = strides_;
+            std::size_t kept_nd = kept_shape.size();
+            std::size_t red_nd = red_shape.size();
+            // for_loop over output cells; each owns its accumulator (no reduction object).
+            hpx::experimental::for_loop(hpx::execution::par,
+                std::size_t(0), out_size,
+                [b, dst, kept_nd, &kept_aux, &kept_axes, red_size, red_nd, &red_aux,
+                 &red_axes, &st, identity, combine](std::size_t out_i) {
+                    // Unravel out_i over the kept extents -> base offset (kept-axis strides).
+                    std::ptrdiff_t base_off = 0;
+                    {
+                        std::size_t rem = out_i;
+                        for (std::size_t j = 0; j < kept_nd; ++j) {
+                            std::size_t coord = rem / kept_aux[j];
+                            rem %= kept_aux[j];
+                            base_off += static_cast<std::ptrdiff_t>(coord) * st[kept_axes[j]];
+                        }
                     }
-                }
-                double acc = identity;
-                for (std::size_t red_i = 0; red_i < red_size; ++red_i) {
-                    std::ptrdiff_t red_off = 0;
-                    std::size_t rem = red_i;
-                    for (std::size_t r = 0; r < red_nd; ++r) {
-                        std::size_t coord = rem / red_aux[r];
-                        rem %= red_aux[r];
-                        red_off += static_cast<std::ptrdiff_t>(coord) * st[red_axes[r]];
+                    T acc = identity;
+                    for (std::size_t red_i = 0; red_i < red_size; ++red_i) {
+                        std::ptrdiff_t red_off = 0;
+                        std::size_t rem = red_i;
+                        for (std::size_t r = 0; r < red_nd; ++r) {
+                            std::size_t coord = rem / red_aux[r];
+                            rem %= red_aux[r];
+                            red_off += static_cast<std::ptrdiff_t>(coord) * st[red_axes[r]];
+                        }
+                        acc = combine(acc, b[base_off + red_off]);
                     }
-                    acc = combine(acc, b[base_off + red_off]);
-                }
-                dst[out_i] = acc;
-            });
-        return out;
+                    dst[out_i] = acc;
+                });
+            return out;
+        });
     }
 
     // broadcast_shapes: right-align shapes sa and sb (treat missing leading axes as 1);
