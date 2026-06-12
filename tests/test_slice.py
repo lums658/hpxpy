@@ -9,7 +9,7 @@ import hpxpy as hpx
 # --- element access ---------------------------------------------------------
 
 def test_getitem_value_and_negative():
-    a = hpx.arange(10)
+    a = hpx.arange(10, dtype="float64")
     assert a[0] == 0.0
     assert a[5] == 5.0
     assert a[-1] == 9.0

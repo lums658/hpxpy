@@ -8,6 +8,8 @@ docs/PLAN.md).
 from __future__ import annotations
 
 import atexit
+import builtins
+import math
 
 from . import _core
 
@@ -372,12 +374,104 @@ def full(shape, value: float, dtype=None) -> Array:
     return _core.full(int(shape), float(value), dtype)
 
 
-def arange(n: int, dtype=None) -> Array:
-    """Create an :class:`Array` ``[0, 1, ..., n-1]`` (NUMA-aware first-touch).
+def _all_integral(*vals) -> bool:
+    """True if every value is an integer (Python ``int`` or integral numpy int).
 
-    ``dtype`` defaults to ``float64`` and accepts ``float32``/``int64``.
+    Matches numpy's arange dtype rule: the result is int64 only when start/stop/step are
+    all integers, else float64. A ``float`` (even a whole one like ``2.0``) is not
+    integral, so ``arange(0.0, 3.0)`` is float64 like numpy.
     """
-    return _core.arange(int(n), dtype)
+    import numbers
+
+    return builtins.all(isinstance(v, numbers.Integral) for v in vals)
+
+
+def arange(start, stop=None, step=1, dtype=None) -> Array:
+    """Create an :class:`Array` of evenly spaced values (like ``numpy.arange``).
+
+    One-argument ``arange(n)`` yields ``[0, 1, ..., n-1]`` (backward-compatible). The
+    2/3-argument form ``arange(start, stop, step)`` yields ``start, start+step, ...`` up
+    to (but excluding) ``stop``; the element count is ``max(0, ceil((stop-start)/step))``.
+    ``step`` may be negative or fractional (``arange(0, 1, 0.1)``). If ``dtype`` is
+    ``None`` the result is int64 when ``start``/``stop``/``step`` are all integers, else
+    float64 (numpy's rule).
+    """
+    if stop is None:
+        start, stop = 0, start
+    if step == 0:
+        raise ValueError("arange: step cannot be zero")
+    if dtype is None:
+        dtype = "int64" if _all_integral(start, stop, step) else "float64"
+    span = stop - start
+    n = math.ceil(span / step)
+    n = builtins.max(0, int(n))
+    return _core.arange_range(float(start), float(step), n, dtype)
+
+
+def linspace(start, stop, num: int = 50, endpoint: bool = True, dtype=None) -> Array:
+    """Evenly spaced numbers over ``[start, stop]`` (like ``numpy.linspace``).
+
+    Returns ``num`` points; with ``endpoint=True`` (default) the last point is exactly
+    ``stop`` and the spacing is ``(stop-start)/(num-1)``, otherwise ``(stop-start)/num``
+    with the endpoint excluded. ``dtype`` defaults to ``float64``.
+    """
+    num = int(num)
+    if num < 0:
+        raise ValueError("linspace: number of samples must be non-negative")
+    if dtype is None:
+        dtype = "float64"
+    div = (num - 1) if endpoint else num
+    step = (stop - start) / div if div > 0 else 0.0
+    set_last = bool(endpoint and num > 1)
+    return _core.linspace(float(start), float(step), num, set_last, float(stop), dtype)
+
+
+def eye(N: int, M=None, k: int = 0, dtype=None) -> Array:
+    """2-D :class:`Array` with ones on the ``k``-th diagonal, zeros elsewhere.
+
+    Shape is ``(N, M)`` (``M`` defaults to ``N``); ``k`` shifts the diagonal (positive
+    upper, negative lower). ``dtype`` defaults to ``float64``. Like ``numpy.eye``.
+    """
+    cols = int(N) if M is None else int(M)
+    if dtype is None:
+        dtype = "float64"
+    return _core.eye(int(N), cols, int(k), dtype)
+
+
+def identity(n: int, dtype=None) -> Array:
+    """The ``n``×``n`` identity :class:`Array` (``eye(n, n)``; like ``numpy.identity``)."""
+    return eye(int(n), int(n), 0, dtype)
+
+
+def empty(shape, dtype=None) -> Array:
+    """Create an :class:`Array` WITHOUT initializing its values (like ``numpy.empty``).
+
+    ``shape`` may be an ``int`` (1-D) or a ``tuple``/``list`` of ints (N-D). The contents
+    are arbitrary; ``dtype`` defaults to ``float64``.
+    """
+    if isinstance(shape, (tuple, list)):
+        return _core.empty(shape, dtype)
+    return _core.empty(int(shape), dtype)
+
+
+def zeros_like(a: Array, dtype=None) -> Array:
+    """Zeros with the same shape (and dtype unless overridden) as ``a`` (``numpy.zeros_like``)."""
+    return zeros(a.shape, dtype=dtype if dtype is not None else a.dtype)
+
+
+def ones_like(a: Array, dtype=None) -> Array:
+    """Ones with the same shape (and dtype unless overridden) as ``a`` (``numpy.ones_like``)."""
+    return ones(a.shape, dtype=dtype if dtype is not None else a.dtype)
+
+
+def empty_like(a: Array, dtype=None) -> Array:
+    """Uninitialized Array with the same shape/dtype as ``a`` (``numpy.empty_like``)."""
+    return empty(a.shape, dtype=dtype if dtype is not None else a.dtype)
+
+
+def full_like(a: Array, fill_value: float, dtype=None) -> Array:
+    """``fill_value`` with the same shape/dtype as ``a`` (``numpy.full_like``)."""
+    return full(a.shape, fill_value, dtype=dtype if dtype is not None else a.dtype)
 
 
 def astype(a: Array, dtype) -> Array:
@@ -426,6 +520,14 @@ __all__ = [
     "ones",
     "full",
     "arange",
+    "linspace",
+    "eye",
+    "identity",
+    "empty",
+    "zeros_like",
+    "ones_like",
+    "empty_like",
+    "full_like",
     "sum",
     "min",
     "max",

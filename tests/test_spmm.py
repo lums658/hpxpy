@@ -47,7 +47,7 @@ def test_spmm_matches_per_column_spmv():
     b = hpx.dense_from(n, k, flat)
     c = a @ b
     for j in range(k):
-        xj = hpx.arange(n) * float(j + 1)      # column j of B as a vector
+        xj = hpx.arange(n, dtype="float64") * float(j + 1)      # column j of B as a vector
         yj = a @ xj                            # SpMV
         for i in (0, 1, n // 2, n - 1):
             assert c.at(i, j) == pytest.approx(yj[i], abs=1e-9)

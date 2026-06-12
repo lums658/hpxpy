@@ -1254,6 +1254,93 @@ public:
         return a;
     }
 
+    // arange_range(start, stop, step, n, dt): n elements of the affine ramp
+    // start + i*step (numpy arange with explicit start/stop/step). The element
+    // count n is computed at the binding boundary (ceil((stop-start)/step)). The
+    // parallel for_loop writes static_cast<T>(start + i*step) on the NUMA-local
+    // HPX workers (same first-touch story as iota).
+    static Array arange_range(double start, double step, std::size_t n,
+        DType dt = DType::F64)
+    {
+        Array a;
+        a.alloc_(n, 0.0, dt);
+        if (n)
+            dispatch_dtype(dt, [&](auto tag) {
+                using T = decltype(tag);
+                T* p = a.template data_as<T>();
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
+                    [p, start, step](std::size_t i) {
+                        p[i] = static_cast<T>(
+                            start + static_cast<double>(i) * step);
+                    });
+            });
+        return a;
+    }
+
+    // linspace(start, step, num, last, dt): `num` evenly spaced points of the ramp
+    // start + i*step. When `endpoint` is requested the binding passes `last`==stop so
+    // the final point is exactly `stop` (avoiding round-off at the endpoint); for
+    // num==1 the single point is `start`. Parallel for_loop on the NUMA workers.
+    static Array linspace(double start, double step, std::size_t num,
+        bool set_last, double last, DType dt = DType::F64)
+    {
+        Array a;
+        a.alloc_(num, 0.0, dt);
+        if (num)
+            dispatch_dtype(dt, [&](auto tag) {
+                using T = decltype(tag);
+                T* p = a.template data_as<T>();
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), num,
+                    [p, start, step](std::size_t i) {
+                        p[i] = static_cast<T>(
+                            start + static_cast<double>(i) * step);
+                    });
+                if (set_last)
+                    p[num - 1] = static_cast<T>(last);
+            });
+        return a;
+    }
+
+    // eye(rows, cols, k, dt): a 2-D (rows x cols) array with ones on the k-th
+    // diagonal ([i,j]==1 iff j == i+k) and zeros elsewhere. block_allocator
+    // value-initializes the buffer to zero; the parallel for_loop over the rows*cols
+    // cells sets the diagonal entries. identity(n) is eye(n, n, 0) at the binding.
+    static Array eye(std::size_t rows, std::size_t cols, std::ptrdiff_t k,
+        DType dt = DType::F64)
+    {
+        Array a;
+        std::size_t total = rows * cols;
+        a.alloc_nd_({rows, cols}, total, 0.0, dt);
+        if (total)
+            dispatch_dtype(dt, [&](auto tag) {
+                using T = decltype(tag);
+                T* p = a.template data_as<T>();
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), total,
+                    [p, cols, k](std::size_t idx) {
+                        std::size_t i = idx / cols;
+                        std::size_t j = idx % cols;
+                        p[idx] = (static_cast<std::ptrdiff_t>(j) ==
+                                  static_cast<std::ptrdiff_t>(i) + k)
+                                     ? static_cast<T>(1)
+                                     : static_cast<T>(0);
+                    });
+            });
+        return a;
+    }
+
+    // empty(shape, dt): an owning N-D buffer of the right dtype WITHOUT initializing
+    // the element values (numpy.empty — contents are arbitrary). Skips the value-fill
+    // by allocating the raw compute::vector with a default-constructed (uninitialized
+    // for trivial T) buffer. NUMA first-touch still happens at allocation.
+    static Array empty(std::vector<std::size_t> shape, DType dt = DType::F64)
+    {
+        std::size_t total = 1;
+        for (auto d : shape) total *= d;
+        Array a;
+        a.alloc_uninit_(std::move(shape), total, dt);
+        return a;
+    }
+
     // astype(dst): a new contiguous owning Array of dtype `dst` with element-wise
     // static_cast from this array's elements. Works for ALL dtypes (no compute guard;
     // it is a typed copy, not a numeric kernel). Casts through the logical (strided)
@@ -1329,6 +1416,39 @@ private:
                 owner_ = std::move(d);
             });
         });
+    }
+
+    // Allocate the matching compute::vector<T> for dtype `dt` WITHOUT initializing the
+    // element values (numpy.empty — contents arbitrary). Reserves n elements then
+    // default-constructs them (a no-op for the trivial T we support), so the values are
+    // uninitialized but NUMA first-touch still happens at allocation.
+    void alloc_buffer_uninit_(std::size_t n, DType dt)
+    {
+        dt_ = dt;
+        on_hpx_thread([&] {
+            dispatch_dtype(dt, [&](auto tag) {
+                using T = decltype(tag);
+                using Vec = hpx::compute::vector<T, block_allocator<T>>;
+                auto d = std::make_shared<Vec>(n);
+                base_ = n ? static_cast<void*>(d->data()) : nullptr;
+                owner_ = std::move(d);
+            });
+        });
+    }
+
+    // alloc_nd_ counterpart that leaves the element values uninitialized (numpy.empty).
+    void alloc_uninit_(std::vector<std::size_t> shape, std::size_t total, DType dt)
+    {
+        shape_ = std::move(shape);
+        size_ = total;
+        std::size_t nd = shape_.size();
+        strides_.resize(nd);
+        if (nd > 0) {
+            strides_[nd - 1] = 1;
+            for (std::size_t k = nd - 1; k-- > 0; )
+                strides_[k] = static_cast<std::ptrdiff_t>(shape_[k + 1]) * strides_[k + 1];
+        }
+        alloc_buffer_uninit_(total, dt);
     }
 
     // Allocate a 1-D owning NUMA buffer of n elements (value-initialized to fill) on an
@@ -1644,6 +1764,19 @@ private:
 inline Array zeros(std::size_t n, DType dt = DType::F64) { return Array(n, 0.0, dt); }
 inline Array full(std::size_t n, double value, DType dt = DType::F64) { return Array(n, value, dt); }
 inline Array arange(std::size_t n, DType dt = DType::F64) { return Array::iota(n, dt); }
+
+// Construction helpers (Wave 2). Element counts / endpoint handling are resolved at
+// the binding boundary (numpy rules); these just thread args into the static factories.
+inline Array arange_range(double start, double step, std::size_t n, DType dt = DType::F64)
+{ return Array::arange_range(start, step, n, dt); }
+inline Array linspace(double start, double step, std::size_t num, bool set_last,
+    double last, DType dt = DType::F64)
+{ return Array::linspace(start, step, num, set_last, last, dt); }
+inline Array eye(std::size_t rows, std::size_t cols, std::ptrdiff_t k,
+    DType dt = DType::F64)
+{ return Array::eye(rows, cols, k, dt); }
+inline Array empty_nd(std::vector<std::size_t> shape, DType dt = DType::F64)
+{ return Array::empty(std::move(shape), dt); }
 
 // N-D overloads
 inline Array zeros_nd(std::vector<std::size_t> shape, DType dt = DType::F64)
