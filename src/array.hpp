@@ -44,6 +44,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -806,6 +807,323 @@ public:
         return scalar_unary_(s, [](auto x, auto sc) { return sc / x; });
     }
 
+    // -----------------------------------------------------------------------
+    // Element-wise unary math ufuncs (NumPy Wave 1).
+    //
+    // PRESERVE-DTYPE forms (output dtype == input dtype): negative/abs/sign.
+    // Implemented via unary(op) with a generic functor (instantiated at T).
+    // -----------------------------------------------------------------------
+    Array negative() const
+    { return unary([](auto x) { using T = decltype(x); return static_cast<T>(-x); }); }
+    Array abs() const
+    {
+        return unary([](auto x) {
+            using T = decltype(x);
+            if constexpr (std::is_integral_v<T>)
+                return static_cast<T>(x < 0 ? -x : x);
+            else
+                return static_cast<T>(std::abs(x));
+        });
+    }
+    Array sign() const
+    {
+        return unary([](auto x) {
+            using T = decltype(x);
+            return static_cast<T>((x > T(0)) - (x < T(0)));
+        });
+    }
+
+    // PROMOTE-INT-TO-FLOAT64 forms: float input keeps its dtype; integer input is
+    // first cast to float64 (so the result is float64, like numpy). The float math
+    // op is applied at the (float) element type. `op` is a generic callable op(T)->T.
+    Array sqrt()  const { return unary_float_([](auto x) { return std::sqrt(x); }); }
+    Array exp()   const { return unary_float_([](auto x) { return std::exp(x); }); }
+    Array log()   const { return unary_float_([](auto x) { return std::log(x); }); }
+    Array sin()   const { return unary_float_([](auto x) { return std::sin(x); }); }
+    Array cos()   const { return unary_float_([](auto x) { return std::cos(x); }); }
+    Array tan()   const { return unary_float_([](auto x) { return std::tan(x); }); }
+    Array floor() const { return unary_float_([](auto x) { return std::floor(x); }); }
+    Array ceil()  const { return unary_float_([](auto x) { return std::ceil(x); }); }
+    Array trunc() const { return unary_float_([](auto x) { return std::trunc(x); }); }
+    // round/rint: numpy round() is round-half-to-even (banker's), matching std::rint
+    // under the default rounding mode (FE_TONEAREST). std::round is half-away-from-zero
+    // and would NOT match numpy, so use std::rint here.
+    Array round() const { return unary_float_([](auto x) { return std::rint(x); }); }
+
+    // -----------------------------------------------------------------------
+    // Element-wise binary math ufuncs (PRESERVE-DTYPE; same-dtype enforced by
+    // binary()'s rule). The functor branches on integral vs float T where the
+    // numpy semantics differ (mod, floor_divide, power).
+    // -----------------------------------------------------------------------
+    Array maximum(Array const& o) const
+    { return binary(o, [](auto a, auto b) { return a > b ? a : b; }); }
+    Array minimum(Array const& o) const
+    { return binary(o, [](auto a, auto b) { return a < b ? a : b; }); }
+    Array power(Array const& o) const
+    {
+        return binary(o, [](auto a, auto b) {
+            using T = decltype(a);
+            if constexpr (std::is_integral_v<T>) {
+                // Integer power by repeated multiplication (numpy: negative exponent
+                // on an integer base is a ValueError; we floor it to 0 like a naive
+                // loop — exercised values are non-negative in tests/usage).
+                T base = a, result = T(1);
+                T e = b;
+                for (T i = 0; i < e; ++i) result *= base;
+                return result;
+            } else {
+                return static_cast<T>(std::pow(a, b));
+            }
+        });
+    }
+    Array mod(Array const& o) const
+    {
+        return binary(o, [](auto a, auto b) {
+            using T = decltype(a);
+            if constexpr (std::is_integral_v<T>) {
+                // numpy int mod follows the sign of the divisor (Python %), unlike
+                // C++ % which follows the dividend. Adjust to match numpy.
+                if (b == T(0)) return T(0);    // numpy warns + yields 0; mirror that
+                T r = a % b;
+                if (r != T(0) && ((r < T(0)) != (b < T(0)))) r += b;
+                return r;
+            } else {
+                // numpy float mod also follows the divisor's sign (fmod follows the
+                // dividend), so adjust the remainder to match.
+                T r = std::fmod(a, b);
+                if (r != T(0) && ((r < T(0)) != (b < T(0)))) r += b;
+                return static_cast<T>(r);
+            }
+        });
+    }
+    Array floor_divide(Array const& o) const
+    {
+        return binary(o, [](auto a, auto b) {
+            using T = decltype(a);
+            if constexpr (std::is_integral_v<T>) {
+                if (b == T(0)) return T(0);    // numpy warns + yields 0; mirror that
+                T q = a / b, r = a % b;
+                // Floor toward negative infinity (numpy //), not truncate-toward-zero.
+                if (r != T(0) && ((r < T(0)) != (b < T(0)))) --q;
+                return q;
+            } else {
+                return static_cast<T>(std::floor(a / b));
+            }
+        });
+    }
+
+    // Scalar forms of power/mod/floor_divide (a ** s, a % s, a // s), reusing the
+    // same numpy-faithful per-T semantics as the Array forms. scalar_unary_ casts the
+    // Python double `s` to T (rejecting a non-integral scalar on int64).
+    Array pow_scalar(double s) const
+    {
+        return scalar_unary_(s, [](auto x, auto sc) {
+            using T = decltype(x);
+            if constexpr (std::is_integral_v<T>) {
+                T base = x, result = T(1);
+                for (T i = 0; i < sc; ++i) result *= base;
+                return result;
+            } else {
+                return static_cast<T>(std::pow(x, sc));
+            }
+        });
+    }
+    Array mod_scalar(double s) const
+    {
+        return scalar_unary_(s, [](auto x, auto sc) {
+            using T = decltype(x);
+            if constexpr (std::is_integral_v<T>) {
+                if (sc == T(0)) return T(0);
+                T r = x % sc;
+                if (r != T(0) && ((r < T(0)) != (sc < T(0)))) r += sc;
+                return r;
+            } else {
+                T r = std::fmod(x, sc);
+                if (r != T(0) && ((r < T(0)) != (sc < T(0)))) r += sc;
+                return static_cast<T>(r);
+            }
+        });
+    }
+    Array floordiv_scalar(double s) const
+    {
+        return scalar_unary_(s, [](auto x, auto sc) {
+            using T = decltype(x);
+            if constexpr (std::is_integral_v<T>) {
+                if (sc == T(0)) return T(0);
+                T q = x / sc, r = x % sc;
+                if (r != T(0) && ((r < T(0)) != (sc < T(0)))) --q;
+                return q;
+            } else {
+                return static_cast<T>(std::floor(x / sc));
+            }
+        });
+    }
+
+    // clip(lo, hi): clamp every element to [lo, hi]. PRESERVE-DTYPE. lo/hi come in as
+    // Python doubles (cast to T per-dtype). If lo > hi, numpy returns hi everywhere;
+    // std::min(std::max(x,lo),hi) reproduces that. (NaN bounds are out of scope.)
+    Array clip(double lo, double hi) const
+    {
+        return unary([lo, hi](auto x) {
+            using T = decltype(x);
+            T l = static_cast<T>(lo), h = static_cast<T>(hi);
+            T v = x < l ? l : x;
+            return static_cast<T>(v > h ? h : v);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Reductions added in Wave 1: mean / prod / any / all / count_nonzero.
+    // -----------------------------------------------------------------------
+
+    // prod(): full reduction -> scalar (double). identity 1, combine multiply.
+    // int64 wraps on overflow (numpy-faithful). Mirrors sum()'s structure.
+    double prod() const
+    {
+        if (size_ == 0)
+            return 1.0;
+        return dispatch_dtype(dt_, [&](auto tag) -> double {
+            using T = decltype(tag);
+            T* base_ = data_as<T>();
+            if (is_contiguous())
+                return static_cast<double>(hpx::reduce(hpx::execution::par,
+                    base_, base_ + size_, T(1), std::multiplies<T>{}));
+            T r = T(1);
+            T* b = base_;
+            auto aux = inner_volumes(shape_);
+            auto const& sh  = shape_;
+            auto const& st  = strides_;
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                hpx::experimental::reduction(r, T(1), std::multiplies<T>{}),
+                [b, &sh, &st, &aux](std::size_t i, T& acc) {
+                    acc *= b[flat_to_offset(i, sh, st, aux)];
+                });
+            return static_cast<double>(r);
+        });
+    }
+
+    // prod_axis: axis reduction with identity 1, combine multiply. Result dtype =
+    // input dtype (like sum_axis). Follows the sum_axis/reduce_axis pattern.
+    Array prod_axis(std::vector<std::size_t> axes, bool keepdims) const
+    {
+        return reduce_axis(std::move(axes), keepdims,
+            [](auto t) { using T = decltype(t); return T(1); },
+            [](auto acc, auto v) { return acc * v; }, /*throw_empty=*/false);
+    }
+
+    // mean(): full reduction -> scalar double. ALWAYS float64 (numpy mean of any
+    // dtype is float64). sum/count, computed in double.
+    double mean() const
+    {
+        if (size_ == 0)
+            return std::numeric_limits<double>::quiet_NaN();    // numpy: mean of empty -> nan
+        return sum() / static_cast<double>(size_);
+    }
+
+    // mean_axis: ALWAYS float64 output. Cast to f64, sum over the axes, divide by the
+    // reduced count. Returns a float64 Array.
+    Array mean_axis(std::vector<std::size_t> axes, bool keepdims) const
+    {
+        // Count of elements reduced into each output cell = product of reduced extents.
+        std::size_t nd = shape_.size();
+        std::size_t count = 1;
+        std::vector<bool> is_red(nd, false);
+        for (std::size_t ax : axes) is_red[ax] = true;
+        for (std::size_t k = 0; k < nd; ++k)
+            if (is_red[k]) count *= shape_[k];
+        // Promote to float64 first so the sum (and divide) are float64 (numpy mean).
+        Array f = (dt_ == DType::F64) ? *this : astype(DType::F64);
+        Array s = f.sum_axis(std::move(axes), keepdims);    // float64 sum
+        // Divide by the reduced count. count==0 (empty reduced axis) yields 0/0 = nan
+        // per IEEE float64, matching numpy's mean-over-empty-axis result.
+        return s.div_scalar(static_cast<double>(count));
+    }
+
+    // any(): true iff ANY element != 0 (logical OR of x!=0). axis=None only (Wave 1).
+    bool any() const
+    {
+        if (size_ == 0)
+            return false;
+        return dispatch_dtype(dt_, [&](auto tag) -> bool {
+            using T = decltype(tag);
+            T* b = data_as<T>();
+            bool acc = false;
+            if (is_contiguous()) {
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                    hpx::experimental::reduction(acc, false, std::logical_or<bool>{}),
+                    [b](std::size_t i, bool& a) { a = a || (b[i] != T(0)); });
+                return acc;
+            }
+            auto aux = inner_volumes(shape_);
+            auto const& sh = shape_;
+            auto const& st = strides_;
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                hpx::experimental::reduction(acc, false, std::logical_or<bool>{}),
+                [b, &sh, &st, &aux](std::size_t i, bool& a) {
+                    a = a || (b[flat_to_offset(i, sh, st, aux)] != T(0));
+                });
+            return acc;
+        });
+    }
+
+    // all(): true iff EVERY element != 0 (logical AND of x!=0). axis=None only.
+    bool all() const
+    {
+        if (size_ == 0)
+            return true;    // numpy: all() of an empty array is True
+        return dispatch_dtype(dt_, [&](auto tag) -> bool {
+            using T = decltype(tag);
+            T* b = data_as<T>();
+            bool acc = true;
+            if (is_contiguous()) {
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                    hpx::experimental::reduction(acc, true, std::logical_and<bool>{}),
+                    [b](std::size_t i, bool& a) { a = a && (b[i] != T(0)); });
+                return acc;
+            }
+            auto aux = inner_volumes(shape_);
+            auto const& sh = shape_;
+            auto const& st = strides_;
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                hpx::experimental::reduction(acc, true, std::logical_and<bool>{}),
+                [b, &sh, &st, &aux](std::size_t i, bool& a) {
+                    a = a && (b[flat_to_offset(i, sh, st, aux)] != T(0));
+                });
+            return acc;
+        });
+    }
+
+    // count_nonzero(): number of elements != 0 (sum of x!=0). Returns int64.
+    std::int64_t count_nonzero() const
+    {
+        if (size_ == 0)
+            return 0;
+        return dispatch_dtype(dt_, [&](auto tag) -> std::int64_t {
+            using T = decltype(tag);
+            T* b = data_as<T>();
+            std::int64_t acc = 0;
+            if (is_contiguous()) {
+                hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                    hpx::experimental::reduction(acc, std::int64_t(0),
+                        std::plus<std::int64_t>{}),
+                    [b](std::size_t i, std::int64_t& a) {
+                        a += (b[i] != T(0)) ? 1 : 0;
+                    });
+                return acc;
+            }
+            auto aux = inner_volumes(shape_);
+            auto const& sh = shape_;
+            auto const& st = strides_;
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+                hpx::experimental::reduction(acc, std::int64_t(0),
+                    std::plus<std::int64_t>{}),
+                [b, &sh, &st, &aux](std::size_t i, std::int64_t& a) {
+                    a += (b[flat_to_offset(i, sh, st, aux)] != T(0)) ? 1 : 0;
+                });
+            return acc;
+        });
+    }
+
     // Deep copy -> a new independent (owning) contiguous Array (numpy a.copy()).
     // The result is ALWAYS contiguous row-major with the same shape as *this.
     Array copy() const
@@ -1071,6 +1389,19 @@ private:
             });
         }
         return r;
+    }
+
+    // Float-math unary helper (the PROMOTE-INT-TO-FLOAT64 rule). For a float dtype
+    // (F64/F32) the op runs at the native element type, preserving the dtype. For an
+    // integer dtype the array is first cast to float64 (so the result is float64,
+    // matching numpy: np.sqrt(int64_array).dtype == float64), then the op runs in f64.
+    // `op` is a generic callable op(T x) -> T applied at the (float) element type.
+    template <typename Op>
+    Array unary_float_(Op op) const
+    {
+        if (dt_ == DType::I64)
+            return astype(DType::F64).unary(op);
+        return unary(op);
     }
 
     // Scalar broadcast helper: bind the Python double `s` (cast to the array's

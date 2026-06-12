@@ -147,6 +147,150 @@ def cumsum(a: Array) -> Array:
     return a.cumsum()
 
 
+# --- Element-wise unary math ufuncs (Wave 1) -------------------------------
+# Preserve-dtype: negative/abs/sign. Promote-int-to-float64: sqrt/exp/log/sin/
+# cos/tan/floor/ceil/trunc/round. Each is a NumPy-style alias for the method.
+
+
+def negative(a: Array) -> Array:
+    """Element-wise ``-a`` (preserves dtype)."""
+    return a.negative()
+
+
+def abs(a: Array) -> Array:  # noqa: A001 - NumPy-style namespace (shadows builtin)
+    """Element-wise absolute value (preserves dtype)."""
+    return a.abs()
+
+
+def sign(a: Array) -> Array:
+    """Element-wise sign (``-1``/``0``/``1``; preserves dtype)."""
+    return a.sign()
+
+
+def sqrt(a: Array) -> Array:
+    """Element-wise square root (int input -> float64; float keeps its dtype)."""
+    return a.sqrt()
+
+
+def exp(a: Array) -> Array:
+    """Element-wise ``e**x`` (int input -> float64)."""
+    return a.exp()
+
+
+def log(a: Array) -> Array:
+    """Element-wise natural logarithm (int input -> float64)."""
+    return a.log()
+
+
+def sin(a: Array) -> Array:
+    """Element-wise sine (int input -> float64)."""
+    return a.sin()
+
+
+def cos(a: Array) -> Array:
+    """Element-wise cosine (int input -> float64)."""
+    return a.cos()
+
+
+def tan(a: Array) -> Array:
+    """Element-wise tangent (int input -> float64)."""
+    return a.tan()
+
+
+def floor(a: Array) -> Array:
+    """Element-wise floor (int input -> float64)."""
+    return a.floor()
+
+
+def ceil(a: Array) -> Array:
+    """Element-wise ceil (int input -> float64)."""
+    return a.ceil()
+
+
+def trunc(a: Array) -> Array:
+    """Element-wise truncate toward zero (int input -> float64)."""
+    return a.trunc()
+
+
+def round(a: Array) -> Array:  # noqa: A001 - NumPy-style namespace (shadows builtin)
+    """Element-wise round-half-to-even / banker's rounding (int input -> float64)."""
+    return a.round()
+
+
+def rint(a: Array) -> Array:
+    """Round to the nearest integer (half-to-even); alias for :func:`round`."""
+    return a.round()
+
+
+# --- Element-wise binary math ufuncs (Wave 1; preserve-dtype) --------------
+
+
+def maximum(a: Array, b: Array) -> Array:
+    """Element-wise ``max(a, b)`` (operands must share a dtype)."""
+    return a.maximum(b)
+
+
+def minimum(a: Array, b: Array) -> Array:
+    """Element-wise ``min(a, b)`` (operands must share a dtype)."""
+    return a.minimum(b)
+
+
+def power(a: Array, b: Array) -> Array:
+    """Element-wise ``a ** b`` (operands must share a dtype)."""
+    return a.power(b)
+
+
+def mod(a: Array, b: Array) -> Array:
+    """Element-wise ``a % b`` (divisor-signed remainder, like numpy)."""
+    return a.mod(b)
+
+
+def floor_divide(a: Array, b: Array) -> Array:
+    """Element-wise ``a // b`` (floor toward ``-inf``, like numpy)."""
+    return a.floor_divide(b)
+
+
+def clip(a: Array, lo: float, hi: float) -> Array:
+    """Clamp each element of ``a`` to ``[lo, hi]`` (preserves dtype)."""
+    return a.clip(float(lo), float(hi))
+
+
+# --- Reductions added in Wave 1 --------------------------------------------
+
+
+def mean(a: Array, axis=None, keepdims: bool = False):
+    """Arithmetic mean of ``a`` (always float64).
+
+    ``axis=None`` (default) returns a Python ``float``; an ``int`` or tuple reduces
+    those axes and returns a new float64 :class:`Array`.
+    """
+    return a.mean(axis, keepdims)
+
+
+def prod(a: Array, axis=None, keepdims: bool = False):
+    """Product of ``a`` (preserves dtype; int wraps on overflow, like numpy).
+
+    ``axis=None`` (default) returns a scalar; an ``int`` or tuple reduces those axes
+    and returns a new :class:`Array`.
+    """
+    return a.prod(axis, keepdims)
+
+
+def any(a: Array, axis=None) -> bool:  # noqa: A001 - NumPy-style namespace
+    """True if any element of ``a`` is nonzero (Wave 1: ``axis=None`` only)."""
+    return a.any(axis)
+
+
+def all(a: Array, axis=None) -> bool:  # noqa: A001 - NumPy-style namespace
+    """True if all elements of ``a`` are nonzero (Wave 1: ``axis=None`` only)."""
+    return a.all(axis)
+
+
+def count_nonzero(a: Array, axis=None) -> int:
+    """Number of nonzero elements in ``a`` (Wave 1: ``axis=None`` only)."""
+    return a.count_nonzero(axis)
+
+
 def csr_from(rows: int, cols: int, row_ptr, col_idx, values) -> CsrMatrix:
     """Build a :class:`CsrMatrix` from explicit CSR arrays (row_ptr/col_idx/values)."""
     return _core.csr_from(int(rows), int(cols), row_ptr, col_idx, values)
@@ -289,6 +433,31 @@ __all__ = [
     "matmul",
     "sort",
     "cumsum",
+    "negative",
+    "abs",
+    "sign",
+    "sqrt",
+    "exp",
+    "log",
+    "sin",
+    "cos",
+    "tan",
+    "floor",
+    "ceil",
+    "trunc",
+    "round",
+    "rint",
+    "maximum",
+    "minimum",
+    "power",
+    "mod",
+    "floor_divide",
+    "clip",
+    "mean",
+    "prod",
+    "any",
+    "all",
+    "count_nonzero",
     "astype",
     "transpose",
     "reshape",
