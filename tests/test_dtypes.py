@@ -265,11 +265,15 @@ def test_int64_min_max_now_works():
     assert a.max() == 3
 
 
-# --- ops still GUARDED to float64 (deferred to later A2.x stages) ------------
+# --- the REMAINING compute kernels now work on non-float64 too (A2.3) --------
+# (copy/sort/cumsum/matmul/axis reductions/1-D slice assignment were GUARDED in
+#  A2.1; A2.3 templated them over the element type, so they now compute. Detailed
+#  numpy-oracle coverage lives in test_dtypes_rest.py.)
 
-def test_float32_copy_raises():
-    with pytest.raises(RuntimeError):
-        hpx.zeros(4, dtype=np.float32).copy()
+def test_float32_copy_now_works():
+    c = hpx.zeros(4, dtype=np.float32).copy()
+    assert c.dtype == np.float32
+    np.testing.assert_array_equal(np.asarray(c), np.zeros(4, np.float32))
 
 
 def test_float32_compute_after_astype_to_f64_works():
