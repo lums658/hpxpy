@@ -157,12 +157,24 @@ def test_clip(dt):
     assert r.dtype == np.dtype(dt)
 
 
-def test_binary_dtype_mismatch_raises():
-    a = hpx.ones(3, dtype=np.float32)
-    b = hpx.ones(3, dtype=np.float64)
-    for fn in (hpx.maximum, hpx.minimum, hpx.power, hpx.mod, hpx.floor_divide):
-        with pytest.raises((TypeError, ValueError)):
-            fn(a, b)
+def test_binary_dtype_mismatch_promotes():
+    """A2.4: mixed-dtype binary ufuncs promote to the numpy result dtype (f32+f64=f64)."""
+    x = np.array([3.0, 1.0, 5.0], dtype=np.float32)
+    y = np.array([2.0, 4.0, 5.0], dtype=np.float64)
+    a = hpx.from_numpy(x)
+    b = hpx.from_numpy(y)
+    cases = [
+        (hpx.maximum, np.maximum),
+        (hpx.minimum, np.minimum),
+        (hpx.power, np.power),
+        (hpx.mod, np.mod),
+        (hpx.floor_divide, np.floor_divide),
+    ]
+    for hfn, nfn in cases:
+        r = hfn(a, b)
+        e = nfn(x, y)
+        assert r.dtype == e.dtype == np.dtype(np.float64)
+        np.testing.assert_allclose(np_out(r), e, rtol=1e-6)
 
 
 # ===========================================================================

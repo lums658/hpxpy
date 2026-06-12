@@ -7,8 +7,11 @@ oracle throughout.
 
 The remaining kernels (axis reductions, matmul, copy, sort/is_sorted, cumsum,
 1-D slice assignment) became dtype-generic in A2.3 (see test_dtypes_rest.py).
-int64 true-division is still guarded (would silently floor); a non-integral
-float scalar on an int64 array raises (no automatic int<->float promotion yet).
+
+A2.4 added numpy type promotion: mixed-dtype element-wise ops, a float scalar on
+an int64 array, and integer true-division now PROMOTE to the numpy result dtype
+instead of raising (the formerly-raising cases below assert the promoted result;
+full promotion coverage lives in test_dtype_promotion.py).
 """
 import numpy as np
 import pytest
@@ -117,49 +120,57 @@ def test_result_dtype_preserved(dt):
 
 
 # ---------------------------------------------------------------------------
-# Same-dtype enforcement: no automatic type promotion yet.
+# Mixed-dtype ops now PROMOTE to the numpy result dtype (A2.4), no longer raise.
 # ---------------------------------------------------------------------------
 
-def test_f32_plus_f64_raises():
+def test_f32_plus_f64_promotes_to_f64():
     a = hpx.ones(3, dtype=np.float32)
     b = hpx.ones(3, dtype=np.float64)
-    with pytest.raises((TypeError, ValueError)):
-        a + b
+    r = a + b
+    assert r.dtype == np.dtype(np.float64) == np.result_type(np.float32, np.float64)
+    np.testing.assert_array_equal(np_out(r), np.full(3, 2.0))
 
 
-def test_i64_plus_f64_raises():
-    a = hpx.from_numpy(np.arange(3, dtype=np.int64))
-    b = hpx.from_numpy(np.arange(3, dtype=np.float64))
-    with pytest.raises((TypeError, ValueError)):
-        a + b
+def test_i64_plus_f64_promotes_to_f64():
+    x = np.arange(3, dtype=np.int64)
+    y = np.arange(3, dtype=np.float64)
+    a = hpx.from_numpy(x)
+    b = hpx.from_numpy(y)
+    r = a + b
+    assert r.dtype == np.dtype(np.float64) == np.result_type(x, y)
+    np.testing.assert_array_equal(np_out(r), x + y)
 
 
-def test_dot_mismatched_dtype_raises():
-    a = hpx.from_numpy(np.arange(3, dtype=np.float32))
-    b = hpx.from_numpy(np.arange(3, dtype=np.float64))
-    with pytest.raises((TypeError, ValueError)):
-        a.dot(b)
+def test_dot_mismatched_dtype_promotes():
+    x = np.arange(3, dtype=np.float32)
+    y = np.arange(3, dtype=np.float64)
+    a = hpx.from_numpy(x)
+    b = hpx.from_numpy(y)
+    assert a.dot(b) == pytest.approx(float(x.dot(y)), rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
-# int64 + float scalar must NOT silently truncate -> raises. Integer scalar OK.
+# int64 + float scalar now PROMOTES to float64 (A2.4). Integer scalar stays int64.
 # ---------------------------------------------------------------------------
 
-def test_int64_plus_float_scalar_raises():
-    a = hpx.from_numpy(np.arange(4, dtype=np.int64))
-    with pytest.raises((TypeError, ValueError)):
-        a + 2.5
-    with pytest.raises((TypeError, ValueError)):
-        a * 1.5
+def test_int64_plus_float_scalar_promotes_to_f64():
+    x = np.arange(4, dtype=np.int64)
+    a = hpx.from_numpy(x)
+    r1 = a + 2.5
+    assert r1.dtype == np.dtype(np.float64) == (x + 2.5).dtype
+    np.testing.assert_array_equal(np_out(r1), x + 2.5)
+    r2 = a * 1.5
+    assert r2.dtype == np.dtype(np.float64)
+    np.testing.assert_array_equal(np_out(r2), x * 1.5)
 
 
 def test_int64_plus_int_scalar_works():
     x = np.arange(4, dtype=np.int64)
     a = hpx_arr(x)
+    # Python int scalar preserves int64 (dtype + values).
+    assert (a + 2).dtype == np.dtype(np.int64)
     np.testing.assert_array_equal(np_out(a + 2), x + 2)
     np.testing.assert_array_equal(np_out(a * 3), x * 3)
-    # A float-valued-but-integral scalar (2.0) is fine on int64.
-    np.testing.assert_array_equal(np_out(a + 2.0), x + 2)
 
 
 def test_float_array_plus_float_scalar_works():
@@ -170,7 +181,7 @@ def test_float_array_plus_float_scalar_works():
 
 
 # ---------------------------------------------------------------------------
-# Division: float dtypes divide vs numpy; int64 true-division is guarded.
+# Division: float dtypes divide vs numpy; int64 true-division PROMOTES to f64.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("dt", [np.float32, np.float64])
@@ -183,13 +194,16 @@ def test_div_float(dt):
     np.testing.assert_allclose(np_out(a / 2), x / 2, rtol=1e-6)
 
 
-def test_int64_div_guarded():
-    a = hpx.from_numpy(np.arange(1, 5, dtype=np.int64))
-    b = hpx.from_numpy(np.arange(1, 5, dtype=np.int64))
-    with pytest.raises(RuntimeError):
-        a / b
-    with pytest.raises(RuntimeError):
-        a / 2
+def test_int64_div_promotes_to_f64():
+    x = np.arange(1, 5, dtype=np.int64)
+    a = hpx.from_numpy(x)
+    b = hpx.from_numpy(x)
+    r1 = a / b                          # numpy: int64 / int64 -> float64
+    assert r1.dtype == np.dtype(np.float64) == (x / x).dtype
+    np.testing.assert_allclose(np_out(r1), x / x, rtol=1e-12)
+    r2 = a / 2                          # numpy: int64 / 2 -> float64
+    assert r2.dtype == np.dtype(np.float64) == (x / 2).dtype
+    np.testing.assert_allclose(np_out(r2), x / 2, rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------

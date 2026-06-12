@@ -43,7 +43,8 @@ def test_div_and_rdiv():
 
 
 def test_int_operand_accepted():
-    # Python int should bind to the double overload.
+    # A Python int scalar binds to the int overload (preserves the int64 dtype after
+    # the A2.4 promotion split); the summed value is unchanged either way.
     assert (hpx.arange(100) * 2).sum() == pytest.approx(100 * 99, rel=1e-12)
 
 

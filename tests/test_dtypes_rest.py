@@ -126,11 +126,13 @@ def test_matmul_transposed_operand(dt):
     np.testing.assert_array_equal(np_out(r), A @ B.T)
 
 
-def test_matmul_dtype_mismatch_raises():
-    a = hpx.from_numpy(np.arange(4, dtype=np.float32).reshape(2, 2))
-    b = hpx.from_numpy(np.arange(4, dtype=np.float64).reshape(2, 2))
-    with pytest.raises((TypeError, ValueError)):
-        a @ b
+def test_matmul_dtype_mismatch_promotes():
+    """A2.4: mixed-dtype matmul promotes to the numpy result dtype (no longer raises)."""
+    A = np.arange(4, dtype=np.float32).reshape(2, 2)
+    B = np.arange(4, dtype=np.float64).reshape(2, 2)
+    r = hpx_arr(A) @ hpx_arr(B)
+    assert r.dtype == np.dtype(np.float64) == (A @ B).dtype
+    np.testing.assert_allclose(np_out(r), A @ B, rtol=1e-6)
 
 
 def test_matmul_dtype_preserved_f64():
