@@ -6,7 +6,10 @@
 # originate from a branch *in this repo* (not forks). Fork PRs skip it; a maintainer
 # vets and re-runs them deliberately.
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
