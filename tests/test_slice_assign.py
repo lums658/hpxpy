@@ -62,5 +62,5 @@ def test_parity_with_numpy():
     npx[10:20] = 3.0
     a[10:20] = 3.0
     npx[50:60] = np.arange(10, dtype=np.float64)
-    a[50:60] = hpx.arange(10)
+    a[50:60] = hpx.arange(10, dtype="float64")
     np.testing.assert_array_equal(a.to_numpy(), npx)

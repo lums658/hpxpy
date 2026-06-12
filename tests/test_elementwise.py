@@ -34,7 +34,7 @@ def test_div_constant():
 
 
 def test_operator_matches_named_method():
-    a, b = hpx.arange(5000), hpx.full(5000, 2.0)
+    a, b = hpx.arange(5000, dtype="float64"), hpx.full(5000, 2.0)
     assert (a + b).sum() == a.add(b).sum()
     assert (a * b).sum() == a.mul(b).sum()
 
@@ -47,6 +47,6 @@ def test_empty():
 
 @pytest.mark.parametrize("op", ["add", "sub", "mul", "div"])
 def test_size_mismatch_raises(op):
-    a, b = hpx.arange(10), hpx.arange(11)
+    a, b = hpx.arange(10, dtype="float64"), hpx.arange(11, dtype="float64")
     with pytest.raises(ValueError):
         getattr(a, op)(b)

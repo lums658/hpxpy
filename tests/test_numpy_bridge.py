@@ -10,7 +10,7 @@ import hpxpy as hpx
 # --- to_numpy: zero-copy writable view --------------------------------------
 
 def test_to_numpy_is_zero_copy_view():
-    a = hpx.arange(10)
+    a = hpx.arange(10, dtype="float64")
     v = hpx.to_numpy(a)
     assert isinstance(v, np.ndarray)
     assert v.dtype == np.float64 and v.shape == (10,)

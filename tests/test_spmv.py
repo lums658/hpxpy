@@ -20,7 +20,7 @@ def test_csr_shape_and_nnz():
 
 def test_identity_spmv_is_x():
     n = 1000
-    x = hpx.arange(n)
+    x = hpx.arange(n, dtype="float64")
     y = _identity(n) @ x                  # I @ x == x
     assert isinstance(y, hpx.Array)
     assert y.size == n
@@ -40,7 +40,7 @@ def test_laplacian_times_arange_interior_is_zero():
     n = 1000
     # interior row i: -(i-1) + 2i - (i+1) = 0. Endpoints are nonzero, so total sum is
     # the boundary contribution: row 0 = 2*0 - 1 = -1; row n-1 = 2(n-1) - (n-2) = n.
-    y = hpx.laplacian_1d(n) @ hpx.arange(n)
+    y = hpx.laplacian_1d(n) @ hpx.arange(n, dtype="float64")
     assert y.sum() == pytest.approx(-1.0 + n, abs=1e-9)
 
 
@@ -62,4 +62,4 @@ def test_spmv_size_mismatch_raises():
 
 def test_free_function_spmv():
     n = 500
-    assert hpx.spmv(_identity(n), hpx.arange(n)).sum() == pytest.approx(n * (n - 1) / 2)
+    assert hpx.spmv(_identity(n), hpx.arange(n, dtype="float64")).sum() == pytest.approx(n * (n - 1) / 2)
