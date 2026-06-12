@@ -170,6 +170,22 @@ public:
     std::size_t ndim() const { return shape_.size(); }
     DType dtype() const { return dt_; }
 
+    // NumPy type-promotion lattice restricted to our three dtypes (A2.4). Mixed-dtype
+    // element-wise ops promote both operands to this result type (== np.result_type):
+    //   F64 dominates (either operand F64 -> F64);
+    //   F32 ⊕ I64 -> F64  (numpy promotes int64+float32 to float64, NOT float32);
+    //   F32 ⊕ F32 -> F32;
+    //   I64 ⊕ I64 -> I64.
+    static DType promote(DType a, DType b)
+    {
+        if (a == DType::F64 || b == DType::F64)
+            return DType::F64;
+        if (a == b)               // F32⊕F32 or I64⊕I64
+            return a;
+        // One is F32 and the other I64 -> F64 (numpy int64+float32 == float64).
+        return DType::F64;
+    }
+
     // shape/strides accessors (N-D).
     std::vector<std::size_t> const& shape() const { return shape_; }
     std::vector<std::ptrdiff_t> const& strides() const { return strides_; }
@@ -651,14 +667,20 @@ public:
     // (contiguous) or for_loop reduction (strided).
     double dot(Array const& other) const
     {
-        if (dt_ != other.dt_)
-            throw std::invalid_argument(
-                "operands have different dtypes (dot); cast explicitly with "
-                ".astype() — automatic type promotion is not yet supported");
         if (size_ != other.size_)
             throw std::invalid_argument("dot(): size mismatch");
         if (size_ == 0)
             return 0.0;
+        // Mixed dtype: promote both operands to Tr = promote(dt_, other.dt_) via the
+        // existing astype, then run the SAME-dtype reduction below at Tr (keeps the
+        // kernel instantiated at one type per call instead of 3x3x3). The same-dtype
+        // path is byte-identical to the pre-A2.4 kernel (transform_reduce fast path /
+        // strided reduction).
+        DType rdt = promote(dt_, other.dt_);
+        if (dt_ != rdt)
+            return astype(rdt).dot(other);
+        if (other.dt_ != rdt)
+            return dot(other.astype(rdt));
         return dispatch_dtype(dt_, [&](auto tag) -> double {
             using T = decltype(tag);
             T* base_ = data_as<T>();
@@ -727,12 +749,11 @@ public:
     // contiguous owning Array. NAIVE O(m*n*k); tiled/BLAS optimization is future work.
     Array matmul(Array const& B) const
     {
-        // Same-dtype rule (no promotion yet, like binary()); result dtype = operand
-        // dtype. int64 matmul accumulates in int64 and wraps on overflow (numpy-faithful).
-        if (dt_ != B.dt_)
-            throw std::invalid_argument(
-                "matmul operands have different dtypes; cast explicitly with "
-                ".astype() — automatic type promotion is not yet supported");
+        // Mixed dtype: promote both operands to Tr = promote(dt_, B.dt_) (numpy
+        // faithful) via the existing astype, then run the SAME-dtype kernel at Tr
+        // (kernel instantiated at one type per call, not 3x3x3). Same-dtype keeps
+        // the result dtype == operand dtype — the int64 path accumulates in int64
+        // and wraps on overflow, byte-identical to pre-A2.4.
         if (ndim() != 2 || B.ndim() != 2)
             throw std::invalid_argument("matmul: both operands must be 2-D");
         std::size_t m = shape_[0];
@@ -742,8 +763,13 @@ public:
         if (k != k2)
             throw std::invalid_argument(
                 "matmul: inner dimensions do not match");
+        DType rdt = promote(dt_, B.dt_);
+        if (dt_ != rdt)
+            return astype(rdt).matmul(B);
+        if (B.dt_ != rdt)
+            return matmul(B.astype(rdt));
         Array C;
-        C.alloc_nd_({m, n}, m * n, 0.0, dt_);
+        C.alloc_nd_({m, n}, m * n, 0.0, rdt);
         if (m * n == 0)
             return C;
         std::ptrdiff_t sta0 = strides_[0], sta1 = strides_[1];
@@ -779,33 +805,54 @@ public:
     Array mul(Array const& o) const { return binary(o, std::multiplies<>{}); }
     Array div(Array const& o) const
     {
-        // True division on integers would silently floor (numpy yields float64);
-        // defer int true-division to A2.3 rather than truncate. Float dtypes proceed.
-        require_float_("true division");
+        // True division ALWAYS yields a float (numpy true_divide). Result dtype =
+        // promote(a,b), bumped to F64 if that would be integer (I64/I64 -> F64).
+        // When both operands are already that float dtype this is the same-dtype
+        // fast path; otherwise binary() fuses the int->float cast in a single pass.
+        DType dr = div_result_dtype_(dt_, o.dt_);
+        if (dt_ == dr && o.dt_ == dr)
+            return binary(o, std::divides<>{});
+        if (dt_ != dr)
+            return astype(dr).div(o);   // lhs now float; recurse promotes rhs if needed
+        // dt_ == dr (float), o.dt_ differs (integer) -> binary fuses the cast.
         return binary(o, std::divides<>{});
     }
 
     // Scalar broadcast -> new Array. The r* forms are reflected (s - a, s / a).
-    // The op is a generic lambda taking (T x, T s); scalar_unary_ casts the Python
-    // double `s` to T per-dtype (rejecting a non-integral scalar on an int64 array).
+    // Two flavors per op (numpy promotes by the Python scalar's TYPE, not value):
+    //   *_scalar(double)      -- a Python FLOAT scalar. On an I64 array this PROMOTES
+    //                            the result to F64 (np: int64_arr + 1.5 -> float64);
+    //                            on F32/F64 it stays that float dtype.
+    //   *_scalar_int(int64_t) -- a Python INT scalar. Preserves the array dtype
+    //                            (I64 stays I64; F32/F64 stay float), cast to T.
+    // True division ALWAYS yields float (I64 -> F64) for both flavors.
     Array add_scalar(double s) const
-    { return scalar_unary_(s, [](auto x, auto sc) { return x + sc; }); }
+    { return scalar_arith_(s, [](auto x, auto sc) { return x + sc; }); }
     Array sub_scalar(double s) const
-    { return scalar_unary_(s, [](auto x, auto sc) { return x - sc; }); }
+    { return scalar_arith_(s, [](auto x, auto sc) { return x - sc; }); }
     Array rsub_scalar(double s) const
-    { return scalar_unary_(s, [](auto x, auto sc) { return sc - x; }); }
+    { return scalar_arith_(s, [](auto x, auto sc) { return sc - x; }); }
     Array mul_scalar(double s) const
-    { return scalar_unary_(s, [](auto x, auto sc) { return x * sc; }); }
+    { return scalar_arith_(s, [](auto x, auto sc) { return x * sc; }); }
     Array div_scalar(double s) const
-    {
-        require_float_("true division");
-        return scalar_unary_(s, [](auto x, auto sc) { return x / sc; });
-    }
+    { return scalar_div_(s, /*reflected=*/false); }
     Array rdiv_scalar(double s) const
-    {
-        require_float_("true division");
-        return scalar_unary_(s, [](auto x, auto sc) { return sc / x; });
-    }
+    { return scalar_div_(s, /*reflected=*/true); }
+
+    // Integer-scalar arithmetic (Python int): preserve the array dtype.
+    Array add_scalar_int(std::int64_t s) const
+    { return scalar_arith_int_(s, [](auto x, auto sc) { return x + sc; }); }
+    Array sub_scalar_int(std::int64_t s) const
+    { return scalar_arith_int_(s, [](auto x, auto sc) { return x - sc; }); }
+    Array rsub_scalar_int(std::int64_t s) const
+    { return scalar_arith_int_(s, [](auto x, auto sc) { return sc - x; }); }
+    Array mul_scalar_int(std::int64_t s) const
+    { return scalar_arith_int_(s, [](auto x, auto sc) { return x * sc; }); }
+    // True division with an int scalar still yields float (I64 -> F64).
+    Array div_scalar_int(std::int64_t s) const
+    { return scalar_div_(static_cast<double>(s), /*reflected=*/false); }
+    Array rdiv_scalar_int(std::int64_t s) const
+    { return scalar_div_(static_cast<double>(s), /*reflected=*/true); }
 
     // -----------------------------------------------------------------------
     // Element-wise unary math ufuncs (NumPy Wave 1).
@@ -1378,17 +1425,16 @@ public:
     }
 
 private:
-    // (A2.3 removed require_f64_: every compute kernel is now dtype-generic over T.
-    // The one remaining dtype guard is require_float_ below, for int64 true-division.)
+    // (A2.3 removed require_f64_; A2.4 removed require_float_ — true division now
+    // PROMOTES integers to float64 instead of raising, via div_result_dtype_.)
 
-    // Reject integer dtypes for ops that are float-only for now (true division —
-    // integer true-division would floor; numpy promotes to float64; deferred to A2.3).
-    void require_float_(const char* op) const
+    // True-division result dtype (numpy true_divide): promote(a,b) but bumped to
+    // F64 when that would be integer (I64/I64 -> F64). F32/F32 stays F32; any pair
+    // touching F64 -> F64; F32⊕I64 -> F64 (== promote()).
+    static DType div_result_dtype_(DType a, DType b)
     {
-        if (dt_ == DType::I64)
-            throw std::runtime_error(std::string(op) +
-                ": int64 true-division lands in a later dtype stage "
-                "(would silently floor); cast to a float dtype with .astype()");
+        DType p = promote(a, b);
+        return (p == DType::I64) ? DType::F64 : p;
     }
 
     // Offset base_ by `n` ELEMENTS (signed), accounting for the element size. Returns
@@ -1539,6 +1585,49 @@ private:
         return unary([s, f](auto x) {
             using T = decltype(x);
             return f(x, static_cast<T>(s));
+        });
+    }
+
+    // Arithmetic with a Python FLOAT scalar (A2.4 promotion). On an I64 array the
+    // result PROMOTES to F64 (numpy: int64_arr + 1.5 -> float64): elements are cast
+    // to double and the op runs in double with the double scalar. On F32/F64 the op
+    // runs at the native element type (dtype preserved) — byte-identical to the old
+    // float path. `f` is a generic op f(T x, T sc) -> T.
+    template <typename F>
+    Array scalar_arith_(double s, F f) const
+    {
+        if (dt_ == DType::I64)
+            return astype(DType::F64).unary(
+                [s, f](auto x) { return f(x, static_cast<double>(s)); });
+        return unary([s, f](auto x) {
+            using T = decltype(x);
+            return f(x, static_cast<T>(s));
+        });
+    }
+
+    // Arithmetic with a Python INT scalar: preserve the array dtype (I64 stays I64,
+    // F32/F64 stay float). The integer scalar is cast to the element type T.
+    template <typename F>
+    Array scalar_arith_int_(std::int64_t s, F f) const
+    {
+        return unary([s, f](auto x) {
+            using T = decltype(x);
+            return f(x, static_cast<T>(s));
+        });
+    }
+
+    // True division by a scalar -> ALWAYS float (numpy true_divide). On I64 the
+    // array promotes to F64; on F32 it stays F32; on F64 it stays F64. `reflected`
+    // selects s / a instead of a / s.
+    Array scalar_div_(double s, bool reflected) const
+    {
+        DType dr = (dt_ == DType::I64) ? DType::F64 : dt_;
+        if (dt_ != dr)
+            return astype(dr).scalar_div_(s, reflected);
+        return unary([s, reflected](auto x) {
+            using T = decltype(x);
+            T sc = static_cast<T>(s);
+            return reflected ? static_cast<T>(sc / x) : static_cast<T>(x / sc);
         });
     }
 
@@ -1700,57 +1789,70 @@ private:
     template <typename Op>
     Array binary(Array const& o, Op op) const
     {
-        // Same-dtype rule: no automatic promotion yet (A2.4). The result dtype is
-        // the operand dtype. (-> Python ValueError via nanobind.)
-        if (dt_ != o.dt_)
-            throw std::invalid_argument(
-                "operands have different dtypes (elementwise op); cast explicitly "
-                "with .astype() — automatic type promotion is not yet supported");
-        return dispatch_dtype(dt_, [&](auto tag) -> Array {
-            using T = decltype(tag);
-            T* base_ = data_as<T>();
-            T* obase = o.data_as<T>();
-            // ---- FAST PATH (zero-penalty): same shape, both contiguous ----
-            if (shape_ == o.shape_ && is_contiguous() && o.is_contiguous()) {
+        // ===== SAME-DTYPE FAST PATH (zero-penalty, the common case) =============
+        // Byte-identical to the pre-A2.4 kernel: result dtype == operand dtype,
+        // one transform / for_loop pass at the native element type T.
+        if (dt_ == o.dt_)
+            return dispatch_dtype(dt_, [&](auto tag) -> Array {
+                using T = decltype(tag);
+                T* base_ = data_as<T>();
+                T* obase = o.data_as<T>();
+                // ---- FAST PATH (zero-penalty): same shape, both contiguous ----
+                if (shape_ == o.shape_ && is_contiguous() && o.is_contiguous()) {
+                    Array r;
+                    r.alloc_nd_(shape_, size_, 0.0, dt_);
+                    if (size_)
+                        hpx::transform(
+                            hpx::execution::par, base_, base_ + size_, obase,
+                            r.template data_as<T>(), op);
+                    return r;
+                }
+
+                // ---- Compute result shape (broadcast or same-shape) ----
+                std::vector<std::size_t> rshape =
+                    (shape_ == o.shape_) ? shape_ : broadcast_shapes(shape_, o.shape_);
+                std::size_t rsize = 1;
+                for (auto d : rshape) rsize *= d;
+
                 Array r;
-                r.alloc_nd_(shape_, size_, 0.0, dt_);
-                if (size_)
-                    hpx::transform(
-                        hpx::execution::par, base_, base_ + size_, obase,
-                        r.template data_as<T>(), op);
+                r.alloc_nd_(rshape, rsize, 0.0, dt_);
+                if (rsize == 0)
+                    return r;
+
+                // Build broadcast views of *this and o aligned to rshape.
+                BcastView va = make_bcast_view(*this, rshape);
+                BcastView vb = make_bcast_view(o, rshape);
+                T* ba = static_cast<T*>(va.base);
+                T* bb = static_cast<T*>(vb.base);
+                T* dst = r.template data_as<T>();
+                auto aux = inner_volumes(rshape);
+                auto sha = va.shape;
+                auto sta = va.strides;
+                auto shb = vb.shape;
+                auto stb = vb.strides;
+                hpx::experimental::for_loop(hpx::execution::par,
+                    std::size_t(0), rsize,
+                    [ba, bb, dst, sha, sta, shb, stb, aux, op](std::size_t i) {
+                        dst[i] = op(ba[flat_to_offset(i, sha, sta, aux)],
+                                    bb[flat_to_offset(i, shb, stb, aux)]);
+                    });
                 return r;
-            }
+            });
 
-            // ---- Compute result shape (broadcast or same-shape) ----
-            std::vector<std::size_t> rshape =
-                (shape_ == o.shape_) ? shape_ : broadcast_shapes(shape_, o.shape_);
-            std::size_t rsize = 1;
-            for (auto d : rshape) rsize *= d;
-
-            Array r;
-            r.alloc_nd_(rshape, rsize, 0.0, dt_);
-            if (rsize == 0)
-                return r;
-
-            // Build broadcast views of *this and o aligned to rshape.
-            BcastView va = make_bcast_view(*this, rshape);
-            BcastView vb = make_bcast_view(o, rshape);
-            T* ba = static_cast<T*>(va.base);
-            T* bb = static_cast<T*>(vb.base);
-            T* dst = r.template data_as<T>();
-            auto aux = inner_volumes(rshape);
-            auto sha = va.shape;
-            auto sta = va.strides;
-            auto shb = vb.shape;
-            auto stb = vb.strides;
-            hpx::experimental::for_loop(hpx::execution::par,
-                std::size_t(0), rsize,
-                [ba, bb, dst, sha, sta, shb, stb, aux, op](std::size_t i) {
-                    dst[i] = op(ba[flat_to_offset(i, sha, sta, aux)],
-                                bb[flat_to_offset(i, shb, stb, aux)]);
-                });
-            return r;
-        });
+        // ===== MIXED-DTYPE PROMOTION PATH (A2.4) ===============================
+        // Promote both operands to Tr = promote(dt_, o.dt_) with the existing astype
+        // (a single typed copy of the off-dtype operand), then run the SAME-dtype
+        // kernel above at Tr. This keeps the op functor instantiated at exactly ONE
+        // type per call (Tr) instead of 3x3x3 (Ta x Tb x Tr) — a deliberate choice
+        // to keep compile time / memory bounded; the (uncommon) mixed path pays one
+        // extra cast pass, while the common same-dtype path stays the zero-penalty
+        // single-pass fast path above. Casting an operand already equal to Tr is a
+        // no-op fast return (astype copies; but only the differing operand is cast).
+        DType rdt = promote(dt_, o.dt_);
+        if (dt_ != rdt)
+            return astype(rdt).binary(o, op);     // lhs now Tr; recurse promotes rhs
+        // dt_ == rdt, so o.dt_ != rdt: cast rhs up, then the same-dtype path runs.
+        return binary(o.astype(rdt), op);
     }
 
     std::shared_ptr<void> owner_;    // keeps the backing alive (dvec/fvec/ivec, or numpy)
