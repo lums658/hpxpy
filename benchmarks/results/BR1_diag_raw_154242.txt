@@ -1,0 +1,112 @@
+[hpxpy env] PY=/home/alumsdaine/.venv/bin/python (Python 3.13.2) | HPX_ROOT=/home/alumsdaine/usr/local/hpx | boost=/opt/apps/gcc15/boost/1.90.0/release
+[hpxpy env] build:  LD_PRELOAD unset (don't preload tcmalloc into cmake/ninja)
+[hpxpy env] run/test: export LD_PRELOAD=$HPXPY_TCMALLOC
+=== diag full benchmark run ===
+node: medusa01.rostam.cct.lsu.edu
+CPU:  Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz
+cores: 40
+avx512: avx512f,avx512dq,avx512cd,avx512bw,avx512vl
+date: Fri Jun 19 12:41:53 PM CDT 2026
+
+--- op=sum dtype=f64 ---
+op=sum n=1000000 threads=40 | L0 0.000633308s 1.58 GEl/s (200x) | L1 0.000169113s 5.91 GEl/s (200x) | L1/L0=0.267
+op=sum n=10000000 threads=40 | L0 0.000471311s 21.22 GEl/s (200x) | L1 0.000470323s 21.26 GEl/s (200x) | L1/L0=0.998
+
+--- op=min dtype=f64 ---
+op=min n=1000000 threads=40 | L0 0.000676739s 1.48 GEl/s (200x) | L1 0.000166553s 6.00 GEl/s (200x) | L1/L0=0.246
+op=min n=10000000 threads=40 | L0 0.000471203s 21.22 GEl/s (200x) | L1 0.000468601s 21.34 GEl/s (200x) | L1/L0=0.994
+
+--- op=max dtype=f64 ---
+op=max n=1000000 threads=40 | L0 0.000635389s 1.57 GEl/s (200x) | L1 0.000164386s 6.08 GEl/s (200x) | L1/L0=0.259
+op=max n=10000000 threads=40 | L0 0.000470789s 21.24 GEl/s (200x) | L1 0.000472241s 21.18 GEl/s (200x) | L1/L0=1.003
+
+--- op=dot dtype=f64 ---
+op=dot n=1000000 threads=40 | L0 0.000678991s 1.47 GEl/s (200x) | L1 0.000171209s 5.84 GEl/s (200x) | L1/L0=0.252
+op=dot n=10000000 threads=40 | L0 0.000800338s 12.49 GEl/s (200x) | L1 0.00080173s 12.47 GEl/s (200x) | L1/L0=1.002
+
+--- op=add dtype=f64 ---
+op=add n=1000000 threads=40 | L0 0.00233615s 0.43 GEl/s (200x) | L1 0.00242562s 0.41 GEl/s (200x) | L1/L0=1.038
+op=add n=10000000 threads=40 | L0 0.00573452s 1.74 GEl/s (87x) | L1 0.00559521s 1.79 GEl/s (89x) | L1/L0=0.976
+
+--- op=sub dtype=f64 ---
+op=sub n=1000000 threads=40 | L0 0.00228727s 0.44 GEl/s (200x) | L1 0.0023767s 0.42 GEl/s (200x) | L1/L0=1.039
+op=sub n=10000000 threads=40 | L0 0.00567713s 1.76 GEl/s (70x) | L1 0.00538595s 1.86 GEl/s (93x) | L1/L0=0.949
+
+--- op=mul dtype=f64 ---
+op=mul n=1000000 threads=40 | L0 0.00236008s 0.42 GEl/s (200x) | L1 0.00235173s 0.43 GEl/s (200x) | L1/L0=0.996
+op=mul n=10000000 threads=40 | L0 0.00560409s 1.78 GEl/s (89x) | L1 0.00554226s 1.80 GEl/s (90x) | L1/L0=0.989
+
+--- op=div dtype=f64 ---
+op=div n=1000000 threads=40 | L0 0.00238211s 0.42 GEl/s (200x) | L1 0.00235194s 0.43 GEl/s (200x) | L1/L0=0.987  [VALUE MISMATCH]
+op=div n=10000000 threads=40 | L0 0.00564502s 1.77 GEl/s (88x) | L1 0.00553519s 1.81 GEl/s (90x) | L1/L0=0.981  [VALUE MISMATCH]
+
+--- op=muls dtype=f64 scalar=2.0 ---
+op=muls n=1000000 threads=40 | L0 0.00224325s 0.45 GEl/s (200x) | L1 0.00229136s 0.44 GEl/s (200x) | L1/L0=1.021
+op=muls n=10000000 threads=40 | L0 0.00501448s 1.99 GEl/s (99x) | L1 0.00493909s 2.02 GEl/s (102x) | L1/L0=0.985
+
+--- op=sort dtype=f64 ---
+op=sort n=1000000 threads=40 | L0 0.0032122s 0.31 GEl/s (156x) | L1 0.00320753s 0.31 GEl/s (156x) | L1/L0=0.999
+op=sort n=10000000 threads=40 | L0 0.0145452s 0.69 GEl/s (34x) | L1 0.0141981s 0.70 GEl/s (35x) | L1/L0=0.976
+
+--- op=scan dtype=f64 ---
+op=scan n=1000000 threads=40 | L0 0.00340923s 0.29 GEl/s (150x) | L1 0.00254487s 0.39 GEl/s (197x) | L1/L0=0.746
+op=scan n=10000000 threads=40 | L0 0.00713999s 1.40 GEl/s (70x) | L1 0.00709784s 1.41 GEl/s (71x) | L1/L0=0.994
+
+--- op=spmv ---
+op=spmv n=1000000 threads=40 | L0 0.00283173s (177x) | L1 0.0028006s (181x) | L1/L0=0.989 | alloc=0.00195826s
+op=spmv n=10000000 threads=40 | L0 0.00872015s (58x) | L1 0.0087189s (58x) | L1/L0=1.000 | alloc=0.0034505s
+
+--- op=spmvk (kernel-only) ---
+op=spmvk n=1000000 threads=40 | L0 0.000450136s (200x) | L1 0.000447499s (200x) | L1/L0=0.994 | alloc=0s
+op=spmvk n=10000000 threads=40 | L0 0.00523552s (96x) | L1 0.00526006s (96x) | L1/L0=1.005 | alloc=0s
+
+--- op=spmm ---
+op=spmm n=1000000 K=16 threads=40 | L0 0.00279325s (180x) | L1 0.00282202s (177x) | L1/L0=1.010
+op=spmm n=10000000 K=16 threads=40 | L0 0.0290679s (18x) | L1 0.0290846s (18x) | L1/L0=1.001
+
+--- op=strided_sum ---
+op=strided_sum n=2000000 stride=2 view_n=1000000 threads=40 | L0 0.000205646s 4.86 GEl/s (200x) | L1 0.000472874s 2.11 GEl/s (200x) | L1/L0=2.299
+op=strided_sum n=20000000 stride=2 view_n=10000000 threads=40 | L0 0.00108836s 9.19 GEl/s (200x) | L1 0.00443915s 2.25 GEl/s (118x) | L1/L0=4.079
+
+--- op=strided_muls scalar=2.0 ---
+op=strided_muls n=2000000 stride=2 view_n=1000000 scalar=2.0 threads=40 | L0 0.0023521s 0.43 GEl/s (200x) | L1 0.00246389s 0.41 GEl/s (200x) | L1/L0=1.048
+op=strided_muls n=20000000 stride=2 view_n=10000000 scalar=2.0 threads=40 | L0 0.00550149s 1.82 GEl/s (91x) | L1 0.00599835s 1.67 GEl/s (84x) | L1/L0=1.090
+
+--- op=matmul (square: NxN @ NxN) ---
+op=matmul m=512 k=512 n=512 threads=40 | L0 0.0116286s 23.08 GFLOP/s (44x) | L1 0.0116045s 23.13 GFLOP/s (44x) | L1/L0=0.998
+op=matmul m=1024 k=1024 n=1024 threads=40 | L0 0.0799543s 26.86 GFLOP/s (7x) | L1 0.0807843s 26.58 GFLOP/s (7x) | L1/L0=1.010
+
+--- op=axis_reduce_0 (reduce over rows, output[j]=sum_i a[i,j]) ---
+op=axis_reduce axis=0 rows=1000 cols=1000 n=1000000 threads=40 | L0 0.00130399s 0.77 GEl/s (200x) | L1 0.0014088s 0.71 GEl/s (200x) | L1/L0=1.080
+op=axis_reduce axis=0 rows=3162 cols=3162 n=9998244 threads=40 | L0 0.00197211s 5.07 GEl/s (200x) | L1 0.00500771s 2.00 GEl/s (99x) | L1/L0=2.539
+
+--- op=axis_reduce_1 (reduce over cols, output[i]=sum_j a[i,j]) ---
+op=axis_reduce axis=1 rows=1000 cols=1000 n=1000000 threads=40 | L0 0.00130649s 0.77 GEl/s (200x) | L1 0.00138403s 0.72 GEl/s (200x) | L1/L0=1.059
+op=axis_reduce axis=1 rows=3162 cols=3162 n=9998244 threads=40 | L0 0.00174768s 5.72 GEl/s (200x) | L1 0.00412148s 2.43 GEl/s (87x) | L1/L0=2.358
+
+--- op=sum dtype=f32 ---
+op=sum dtype=f32 n=1000000 threads=40 | L0 0.000651119s 1.54 GEl/s (200x) | L1 0.000167805s 5.96 GEl/s (200x) | L1/L0=0.258
+op=sum dtype=f32 n=10000000 threads=40 | L0 0.000448444s 22.30 GEl/s (200x) | L1 0.000441455s 22.65 GEl/s (200x) | L1/L0=0.984
+
+--- op=sum dtype=i64 ---
+op=sum dtype=i64 n=1000000 threads=40 | L0 0.000655648s 1.53 GEl/s (200x) | L1 0.000172892s 5.78 GEl/s (200x) | L1/L0=0.264
+op=sum dtype=i64 n=10000000 threads=40 | L0 0.00025266s 39.58 GEl/s (200x) | L1 0.000254674s 39.27 GEl/s (200x) | L1/L0=1.008
+
+--- op=add dtype=f32 ---
+op=add dtype=f32 n=1000000 threads=40 | L0 0.00192091s 0.52 GEl/s (200x) | L1 0.00193546s 0.52 GEl/s (200x) | L1/L0=1.008
+op=add dtype=f32 n=10000000 threads=40 | L0 0.00392527s 2.55 GEl/s (125x) | L1 0.00392629s 2.55 GEl/s (127x) | L1/L0=1.000
+
+--- op=add dtype=i64 ---
+op=add dtype=i64 n=1000000 threads=40 | L0 0.00236016s 0.42 GEl/s (200x) | L1 0.00237042s 0.42 GEl/s (200x) | L1/L0=1.004
+op=add dtype=i64 n=10000000 threads=40 | L0 0.00561628s 1.78 GEl/s (89x) | L1 0.00552148s 1.81 GEl/s (90x) | L1/L0=0.983
+
+--- op=muls dtype=f32 scalar=2.0 ---
+op=muls dtype=f32 n=1000000 threads=40 | L0 0.00189094s 0.53 GEl/s (200x) | L1 0.00194764s 0.51 GEl/s (200x) | L1/L0=1.030
+op=muls dtype=f32 n=10000000 threads=40 | L0 0.00365708s 2.73 GEl/s (135x) | L1 0.00364849s 2.74 GEl/s (137x) | L1/L0=0.998
+
+--- op=muls dtype=i64 scalar=2 ---
+op=muls dtype=i64 n=1000000 threads=40 | L0 0.00232108s 0.43 GEl/s (194x) | L1 0.00456165s 0.22 GEl/s (109x) | L1/L0=1.965
+op=muls dtype=i64 n=10000000 threads=40 | L0 0.00501678s 1.99 GEl/s (70x) | L1 0.00977766s 1.02 GEl/s (51x) | L1/L0=1.949
+
+=== done ===
+Fri Jun 19 12:42:42 PM CDT 2026
