@@ -1,0 +1,26 @@
+=== node medusa03.rostam.cct.lsu.edu | Fri Jun 19 02:04:19 PM CDT 2026 ===
+CPU(s):                                  40
+Model name:                              Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz
+Core(s) per socket:                      20
+Socket(s):                               2
+CPU(s) scaling MHz:                      77%
+CPU max MHz:                             3700.0000
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf pni pclmulqdq dtes64 monitor ds_cpl smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid dca sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb cat_l3 cdp_l3 pti intel_ppin ssbd mba ibrs ibpb stibp fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm cqm mpx rdt_a avx512f avx512dq rdseed adx smap clflushopt clwb intel_pt avx512cd avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local dtherm ida arat pln pts pku ospke md_clear flush_l1d arch_capabilities
+MemTotal: MemTotal:       97011664 kB
+
+=== MEMORY-BOUND: sum (achieved BW = GEl/s x 8 bytes); sweep n to find saturation ===
+op=sum n=10000000 threads=40 | L0 0.000779416s 12.83 GEl/s (200x) | L1 0.000477723s 20.93 GEl/s (200x) | L1/L0=0.613
+op=sum n=100000000 threads=40 | L0 0.00496278s 20.15 GEl/s (103x) | L1 0.00497172s 20.11 GEl/s (102x) | L1/L0=1.002
+op=sum n=500000000 threads=40 | L0 0.0238245s 20.99 GEl/s (22x) | L1 0.0238035s 21.01 GEl/s (22x) | L1/L0=0.999
+op=sum n=1000000000 threads=40 | L0 0.0471951s 21.19 GEl/s (9x) | L1 0.0471684s 21.20 GEl/s (11x) | L1/L0=0.999
+=== more memory-bound points @ n=1e8 (add reads2+writes1=3n; dot reads2n; mul 3n) ===
+op=add n=100000000 threads=40 | L0 0.0390452s 2.56 GEl/s (13x) | L1 0.0436014s 2.29 GEl/s (12x) | L1/L0=1.117
+op=dot n=100000000 threads=40 | L0 0.00870899s 11.48 GEl/s (59x) | L1 0.00872172s 11.47 GEl/s (58x) | L1/L0=1.001
+op=mul n=100000000 threads=40 | L0 0.0392049s 2.55 GEl/s (13x) | L1 0.0393936s 2.54 GEl/s (10x) | L1/L0=1.005
+op=muls n=100000000 threads=40 | L0 0.0344637s 2.90 GEl/s (15x) | L1 0.0342413s 2.92 GEl/s (15x) | L1/L0=0.994
+
+=== COMPUTE-BOUND: matmul GFLOP/s = 2*m^3/time ; non-cache sizes ===
+op=matmul m=1024 k=1024 n=1024 threads=40 | L0 0.0791526s 27.13 GFLOP/s (7x) | L1 0.0793546s 27.06 GFLOP/s (7x) | L1/L0=1.003
+op=matmul m=2048 k=2048 n=2048 threads=40 | L0 2.91712s 5.89 GFLOP/s (5x) | L1 2.87898s 5.97 GFLOP/s (5x) | L1/L0=0.987
+op=matmul m=4096 k=4096 n=4096 threads=40 | L0 36.2044s 3.80 GFLOP/s (5x) | L1 35.1471s 3.91 GFLOP/s (5x) | L1/L0=0.971
+=== DONE | Fri Jun 19 02:12:07 PM CDT 2026 ===
