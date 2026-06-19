@@ -1,0 +1,109 @@
+[BR3] Starting scaling sweep on medusa01.rostam.cct.lsu.edu at Fri Jun 19 01:12:49 PM CDT 2026
+[BR3] SLURM_JOB_ID=154246
+[BR3] diag binary: /work/alumsdaine/LSU/hpxpy-bench/cpp_baseline/build/diag
+
+[BR3] === STRONG SCALING ===
+
+[BR3] --- threads=1 ---
+[BR3]   sum n=1e8 threads=1
+op=sum n=100000000 threads=1 | L0 0.139124s 0.72 GEl/s (22x) | L1 0.139163s 0.72 GEl/s (22x) | L1/L0=1.000
+[BR3]   dot n=1e8 threads=1
+op=dot n=100000000 threads=1 | L0 0.15876s 0.63 GEl/s (19x) | L1 0.158297s 0.63 GEl/s (19x) | L1/L0=0.997
+[BR3]   add n=1e8 threads=1
+op=add n=100000000 threads=1 | L0 0.371323s 0.27 GEl/s (9x) | L1 0.371682s 0.27 GEl/s (8x) | L1/L0=1.001
+[BR3]   matmul 1024x1024 threads=1
+op=matmul m=1024 k=1024 n=1024 threads=1 | L0 3.43761s 0.62 GFLOP/s (3x) | L1 3.43647s 0.62 GFLOP/s (3x) | L1/L0=1.000
+[BR3]   done threads=1
+
+[BR3] --- threads=2 ---
+[BR3]   sum n=1e8 threads=2
+op=sum n=100000000 threads=2 | L0 0.0699594s 1.43 GEl/s (42x) | L1 0.0699579s 1.43 GEl/s (43x) | L1/L0=1.000
+[BR3]   dot n=1e8 threads=2
+op=dot n=100000000 threads=2 | L0 0.080151s 1.25 GEl/s (38x) | L1 0.0800524s 1.25 GEl/s (37x) | L1/L0=0.999
+[BR3]   add n=1e8 threads=2
+op=add n=100000000 threads=2 | L0 0.190238s 0.53 GEl/s (16x) | L1 0.190591s 0.52 GEl/s (16x) | L1/L0=1.002
+[BR3]   matmul 1024x1024 threads=2
+op=matmul m=1024 k=1024 n=1024 threads=2 | L0 1.21754s 1.76 GFLOP/s (3x) | L1 1.21687s 1.76 GFLOP/s (3x) | L1/L0=0.999
+[BR3]   done threads=2
+
+[BR3] --- threads=4 ---
+[BR3]   sum n=1e8 threads=4
+op=sum n=100000000 threads=4 | L0 0.0353016s 2.83 GEl/s (50x) | L1 0.0352909s 2.83 GEl/s (50x) | L1/L0=1.000
+[BR3]   dot n=1e8 threads=4
+op=dot n=100000000 threads=4 | L0 0.0408068s 2.45 GEl/s (50x) | L1 0.0408558s 2.45 GEl/s (50x) | L1/L0=1.001
+[BR3]   add n=1e8 threads=4
+op=add n=100000000 threads=4 | L0 0.106057s 0.94 GEl/s (28x) | L1 0.187175s 0.53 GEl/s (20x) | L1/L0=1.765
+[BR3]   matmul 1024x1024 threads=4
+op=matmul m=1024 k=1024 n=1024 threads=4 | L0 0.616286s 3.48 GFLOP/s (5x) | L1 0.615764s 3.49 GFLOP/s (5x) | L1/L0=0.999
+[BR3]   done threads=4
+
+[BR3] --- threads=8 ---
+[BR3]   sum n=1e8 threads=8
+op=sum n=100000000 threads=8 | L0 0.0183418s 5.45 GEl/s (50x) | L1 0.0183488s 5.45 GEl/s (50x) | L1/L0=1.000
+[BR3]   dot n=1e8 threads=8
+op=dot n=100000000 threads=8 | L0 0.0203721s 4.91 GEl/s (50x) | L1 0.0203655s 4.91 GEl/s (50x) | L1/L0=1.000
+[BR3]   add n=1e8 threads=8
+op=add n=100000000 threads=8 | L0 0.0723865s 1.38 GEl/s (42x) | L1 0.116165s 0.86 GEl/s (26x) | L1/L0=1.605
+[BR3]   matmul 1024x1024 threads=8
+op=matmul m=1024 k=1024 n=1024 threads=8 | L0 0.314934s 6.82 GFLOP/s (10x) | L1 0.314926s 6.82 GFLOP/s (10x) | L1/L0=1.000
+[BR3]   done threads=8
+
+[BR3] --- threads=16 ---
+[BR3]   sum n=1e8 threads=16
+op=sum n=100000000 threads=16 | L0 0.00929955s 10.75 GEl/s (50x) | L1 0.00930784s 10.74 GEl/s (50x) | L1/L0=1.001
+[BR3]   dot n=1e8 threads=16
+op=dot n=100000000 threads=16 | L0 0.0154303s 6.48 GEl/s (50x) | L1 0.0154484s 6.47 GEl/s (50x) | L1/L0=1.001
+[BR3]   add n=1e8 threads=16
+op=add n=100000000 threads=16 | L0 0.0695406s 1.44 GEl/s (44x) | L1 0.0832324s 1.20 GEl/s (34x) | L1/L0=1.197
+[BR3]   matmul 1024x1024 threads=16
+op=matmul m=1024 k=1024 n=1024 threads=16 | L0 0.169314s 12.68 GFLOP/s (18x) | L1 0.168872s 12.72 GFLOP/s (18x) | L1/L0=0.997
+[BR3]   done threads=16
+
+[BR3] --- threads=20 ---
+[BR3]   sum n=1e8 threads=20
+op=sum n=100000000 threads=20 | L0 0.00807086s 12.39 GEl/s (50x) | L1 0.00803608s 12.44 GEl/s (50x) | L1/L0=0.996
+[BR3]   dot n=1e8 threads=20
+op=dot n=100000000 threads=20 | L0 0.0156107s 6.41 GEl/s (50x) | L1 0.0156231s 6.40 GEl/s (50x) | L1/L0=1.001
+[BR3]   add n=1e8 threads=20
+op=add n=100000000 threads=20 | L0 0.0721197s 1.39 GEl/s (42x) | L1 0.0885425s 1.13 GEl/s (30x) | L1/L0=1.228
+[BR3]   matmul 1024x1024 threads=20
+op=matmul m=1024 k=1024 n=1024 threads=20 | L0 0.140096s 15.33 GFLOP/s (20x) | L1 0.146173s 14.69 GFLOP/s (20x) | L1/L0=1.043
+[BR3]   done threads=20
+
+[BR3] --- threads=40 ---
+[BR3]   sum n=1e8 threads=40
+op=sum n=100000000 threads=40 | L0 0.00496431s 20.14 GEl/s (50x) | L1 0.00497025s 20.12 GEl/s (50x) | L1/L0=1.001
+[BR3]   dot n=1e8 threads=40
+op=dot n=100000000 threads=40 | L0 0.0088161s 11.34 GEl/s (50x) | L1 0.0088411s 11.31 GEl/s (50x) | L1/L0=1.003
+[BR3]   add n=1e8 threads=40
+op=add n=100000000 threads=40 | L0 0.0395678s 2.53 GEl/s (50x) | L1 0.0392475s 2.55 GEl/s (50x) | L1/L0=0.992
+[BR3]   matmul 1024x1024 threads=40
+op=matmul m=1024 k=1024 n=1024 threads=40 | L0 0.0806741s 26.62 GFLOP/s (20x) | L1 0.0843339s 25.46 GFLOP/s (20x) | L1/L0=1.045
+[BR3]   done threads=40
+
+[BR3] === WEAK SCALING (sum, n = 5e6 * threads) ===
+
+[BR3]   weak_sum n=5000000 threads=1
+op=sum n=5000000 threads=1 | L0 0.00673596s 0.74 GEl/s (50x) | L1 0.00672935s 0.74 GEl/s (50x) | L1/L0=0.999
+
+[BR3]   weak_sum n=10000000 threads=2
+op=sum n=10000000 threads=2 | L0 0.00703102s 1.42 GEl/s (50x) | L1 0.00702298s 1.42 GEl/s (50x) | L1/L0=0.999
+
+[BR3]   weak_sum n=20000000 threads=4
+op=sum n=20000000 threads=4 | L0 0.00712358s 2.81 GEl/s (50x) | L1 0.00710596s 2.81 GEl/s (50x) | L1/L0=0.998
+
+[BR3]   weak_sum n=40000000 threads=8
+op=sum n=40000000 threads=8 | L0 0.00738963s 5.41 GEl/s (50x) | L1 0.00737571s 5.42 GEl/s (50x) | L1/L0=0.998
+
+[BR3]   weak_sum n=80000000 threads=16
+op=sum n=80000000 threads=16 | L0 0.00738501s 10.83 GEl/s (50x) | L1 0.00735158s 10.88 GEl/s (50x) | L1/L0=0.995
+
+[BR3]   weak_sum n=100000000 threads=20
+op=sum n=100000000 threads=20 | L0 0.00804146s 12.44 GEl/s (50x) | L1 0.00801722s 12.47 GEl/s (50x) | L1/L0=0.997
+
+[BR3]   weak_sum n=200000000 threads=40
+op=sum n=200000000 threads=40 | L0 0.00962018s 20.79 GEl/s (50x) | L1 0.00962554s 20.78 GEl/s (50x) | L1/L0=1.001
+
+[BR3] Sweep complete at Fri Jun 19 01:15:45 PM CDT 2026
+[BR3] DONE job=154246
+RAW_PATH=/work/alumsdaine/LSU/hpxpy-bench/benchmarks/results/BR3_slurm_154246.out
