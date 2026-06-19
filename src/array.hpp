@@ -1284,6 +1284,60 @@ public:
         return r;
     }
 
+    // Inclusive prefix product -> a NEW (owning) Array (numpy a.cumprod()).
+    Array cumprod() const
+    {
+        Array r;
+        r.alloc_(size_, 1.0, dt_);
+        if (size_) {
+            dispatch_dtype(dt_, [&](auto tag) {
+                using T = decltype(tag);
+                T* src = data_as<T>();
+                T* dst = r.template data_as<T>();
+                if (is_contiguous()) {
+                    hpx::inclusive_scan(hpx::execution::par, src, src + size_, dst,
+                        std::multiplies<T>{}, T(1));
+                } else {
+                    auto aux = inner_volumes(shape_);
+                    auto const& sh = shape_;
+                    auto const& st = strides_;
+                    hpx::experimental::for_loop(hpx::execution::par,
+                        std::size_t(0), size_,
+                        [src, dst, &sh, &st, &aux](std::size_t i) {
+                            dst[i] = src[flat_to_offset(i, sh, st, aux)];
+                        });
+                    hpx::inclusive_scan(hpx::execution::par, dst, dst + size_, dst,
+                        std::multiplies<T>{}, T(1));
+                }
+            });
+        }
+        return r;
+    }
+
+    // argsort() -> I64 Array of indices that would sort this array ascending.
+    // Uses hpx::sort on an iota index buffer with a comparator that reads the
+    // source data. Works for any dtype (reads via data_as<T> inside dispatch).
+    Array argsort() const
+    {
+        Array idx;
+        idx.alloc_(size_, 0.0, DType::I64);
+        if (size_ == 0) return idx;
+        int64_t* ip = idx.template data_as<int64_t>();
+        // Fill iota [0, size_) in parallel.
+        hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), size_,
+            [ip](std::size_t i) { ip[i] = static_cast<int64_t>(i); });
+        dispatch_dtype(dt_, [&](auto tag) {
+            using T = decltype(tag);
+            T const* data = data_as<T>();
+            hpx::sort(hpx::execution::par, ip, ip + size_,
+                [data](int64_t a, int64_t b) { return data[a] < data[b]; });
+        });
+        return idx;
+    }
+
+    // where(cond, x, y) [free function below]: element i is x[i] if cond[i]!=0
+    // else y[i]. All three arrays must have the same size and dtype.
+
     // 0, 1, 2, ..., n-1. block_allocator first-touches at allocation; the parallel
     // for_loop (run directly) writes the ramp on the same HPX workers (NUMA-local).
     // Carries the dtype; the ramp is written in the matching element type T.
@@ -1887,5 +1941,33 @@ inline Array ones_nd(std::vector<std::size_t> shape, DType dt = DType::F64)
 { return Array(std::move(shape), 1.0, dt); }
 inline Array full_nd(std::vector<std::size_t> shape, double value, DType dt = DType::F64)
 { return Array(std::move(shape), value, dt); }
+
+// where(cond, x, y): element-wise conditional — result[i] = x[i] if cond[i]!=0 else y[i].
+// All three arrays must be contiguous, same size and dtype. cond may be any dtype
+// (nonzero = true, exactly numpy semantics).
+inline Array where(Array const& cond, Array const& x, Array const& y)
+{
+    if (x.size() != y.size() || x.size() != cond.size())
+        throw std::invalid_argument("where: all arrays must have the same size");
+    if (x.dtype() != y.dtype())
+        throw std::invalid_argument("where: x and y must have the same dtype");
+    Array r = Array::empty(x.shape(), x.dtype());
+    std::size_t n = x.size();
+    dispatch_dtype(cond.dtype(), [&](auto ctag) {
+        using C = decltype(ctag);
+        C const* cp = cond.template data_as<C>();
+        dispatch_dtype(x.dtype(), [&](auto xtag) {
+            using T = decltype(xtag);
+            T const* xp = x.template data_as<T>();
+            T const* yp = y.template data_as<T>();
+            T*       rp = r.template data_as<T>();
+            hpx::experimental::for_loop(hpx::execution::par, std::size_t(0), n,
+                [cp, xp, yp, rp](std::size_t i) {
+                    rp[i] = (cp[i] != C(0)) ? xp[i] : yp[i];
+                });
+        });
+    });
+    return r;
+}
 
 }    // namespace hpxpy

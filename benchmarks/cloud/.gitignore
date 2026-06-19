@@ -1,0 +1,5 @@
+build/
+build_test/
+.agas_probe
+*.o
+*.d
