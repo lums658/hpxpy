@@ -13,8 +13,14 @@ import math
 
 from . import _core
 
+#: Random number generation submodule (seed/rand/randn/uniform/randint).
+random = _core.random
+
 #: The core float64 array type, backed by a NUMA-aware HPX compute::vector.
 Array = _core.Array
+
+#: Alias for :class:`Array` (numpy compatibility: ``isinstance(x, hpx.ndarray)``).
+ndarray = Array
 
 #: A CSR (compressed sparse row) float64 matrix (see :func:`csr_from`, :func:`laplacian_1d`).
 CsrMatrix = _core.CsrMatrix
@@ -149,6 +155,21 @@ def cumsum(a: Array) -> Array:
     return a.cumsum()
 
 
+def cumprod(a: Array) -> Array:
+    """Inclusive prefix product of ``a`` (parallel ``hpx::inclusive_scan`` with multiply)."""
+    return a.cumprod()
+
+
+def argsort(a: Array) -> Array:
+    """I64 Array of indices that would sort ``a`` ascending (like ``numpy.argsort``)."""
+    return a.argsort()
+
+
+def where(condition: Array, x: Array, y: Array) -> Array:
+    """Element-wise conditional: ``result[i] = x[i] if condition[i] != 0 else y[i]``."""
+    return _core.where(condition, x, y)
+
+
 # --- Element-wise unary math ufuncs (Wave 1) -------------------------------
 # Preserve-dtype: negative/abs/sign. Promote-int-to-float64: sqrt/exp/log/sin/
 # cos/tan/floor/ceil/trunc/round. Each is a NumPy-style alias for the method.
@@ -197,6 +218,49 @@ def cos(a: Array) -> Array:
 def tan(a: Array) -> Array:
     """Element-wise tangent (int input -> float64)."""
     return a.tan()
+
+
+_LN2  = math.log(2)
+_LN10 = math.log(10)
+
+
+def exp2(a: Array) -> Array:
+    """Element-wise ``2**x``."""
+    return exp(a * _LN2)
+
+
+def log2(a: Array) -> Array:
+    """Element-wise log base-2."""
+    return log(a) * (1.0 / _LN2)
+
+
+def log10(a: Array) -> Array:
+    """Element-wise log base-10."""
+    return log(a) * (1.0 / _LN10)
+
+
+def sinh(a: Array) -> Array:
+    """Element-wise hyperbolic sine."""
+    e = exp(a)
+    return (e - exp(negative(a))) * 0.5
+
+
+def cosh(a: Array) -> Array:
+    """Element-wise hyperbolic cosine."""
+    e = exp(a)
+    return (e + exp(negative(a))) * 0.5
+
+
+def tanh(a: Array) -> Array:
+    """Element-wise hyperbolic tangent."""
+    e2 = exp(a * 2.0)
+    one = ones_like(e2)
+    return (e2 - one) / (e2 + one)
+
+
+def square(a: Array) -> Array:
+    """Element-wise ``x**2``."""
+    return a * a
 
 
 def floor(a: Array) -> Array:
@@ -507,6 +571,69 @@ def num_worker_threads() -> int:
     return _core.num_worker_threads()
 
 
+def num_threads() -> int:
+    """Alias for :func:`num_worker_threads`."""
+    return _core.num_worker_threads()
+
+
+def is_running() -> bool:
+    """Return True if the HPX runtime is currently active."""
+    return _initialized
+
+
+def array(data, dtype=None) -> Array:
+    """Construct an :class:`Array` from a Python list, tuple, or scalar.
+
+    Equivalent to ``from_numpy(numpy.asarray(data, dtype))``. Uses float64 by
+    default (numpy rule: integer lists stay int64 unless dtype forces otherwise).
+    """
+    import numpy as _np
+    dt = dtype if dtype is not None else None
+    return from_numpy(_np.asarray(data, dtype=dt))
+
+
+class runtime:
+    """Context manager that initialises the HPX runtime on entry and finalises it on exit.
+
+    Usage::
+
+        with hpx.runtime(num_threads=4):
+            arr = hpx.arange(1_000_000)
+            print(hpx.sum(arr))
+    """
+    def __init__(self, num_threads=None, **kwargs):
+        self._num_threads = num_threads
+
+    def __enter__(self):
+        init(self._num_threads)
+        return self
+
+    def __exit__(self, *args):
+        finalize()
+
+
+def std(a: Array, axis=None):
+    """Population standard deviation of ``a`` (like ``numpy.std``).
+
+    Uses a two-pass algorithm: mean then sqrt(mean((a-mean)**2)).
+    Returns a Python float for full-array reductions (``axis=None``),
+    or an :class:`Array` when ``axis`` is specified.
+    """
+    m = mean(a, axis=axis)
+    sq = power(a - m, 2)
+    v = mean(sq, axis=axis)
+    if axis is None:
+        return math.sqrt(v)
+    return sqrt(v)
+
+
+def var(a: Array, axis=None):
+    """Population variance of ``a`` (like ``numpy.var``)."""
+    m = mean(a, axis=axis)
+    v = mean(power(a - m, 2), axis=axis)
+    return v
+
+
 def hpx_version() -> str:
     """The linked HPX version string."""
     return _core.hpx_version()
@@ -535,6 +662,9 @@ __all__ = [
     "matmul",
     "sort",
     "cumsum",
+    "cumprod",
+    "argsort",
+    "where",
     "negative",
     "abs",
     "sign",
@@ -544,6 +674,13 @@ __all__ = [
     "sin",
     "cos",
     "tan",
+    "sinh",
+    "cosh",
+    "tanh",
+    "exp2",
+    "log2",
+    "log10",
+    "square",
     "floor",
     "ceil",
     "trunc",
@@ -576,6 +713,14 @@ __all__ = [
     "from_numpy",
     "to_numpy",
     "num_worker_threads",
+    "num_threads",
+    "is_running",
+    "array",
+    "ndarray",
+    "runtime",
+    "std",
+    "var",
+    "random",
     "hpx_version",
     "num_localities",
     "locality_id",

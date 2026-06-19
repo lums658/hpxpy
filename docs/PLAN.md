@@ -1,10 +1,12 @@
 # HPXPy (rewrite) — Plan & Process
 
-**Status:** ACTIVE. Phase 1 (thin HPX wrapper, single-locality) complete — M1–M3, slices +
-strided views, and M5 sparse (SpMV/SpMM), all at ~0 abstraction penalty; the NumPy bridge +
-drop-in parity suite landed; **M4a distributed runtime merged** (multi-locality via the TCP
-parcelport). Now in **Phase A (single-node usability)**, starting with N-D arrays — see §8.
-Repo: `github.com/lums658/hpxpy`. Created 2026-06-04; last validated 2026-06-10.
+**Status:** ACTIVE. Phase 1 (thin HPX wrapper, single-locality) complete and Phase A
+(single-node usability) feature-complete — N-D arrays (all dtypes, constructors, views,
+slicing, broadcasting, ufuncs, reductions, NumPy bridge) merged and tested at ~0
+abstraction penalty. ~302 tests, 100% coverage. TU split (build/feat/build-tu-split),
+random submodule, extended ufuncs (exp2/log2/log10/sinh/cosh/tanh/square), Wave 3 ops
+(where/cumprod/argsort/std/var) added 2026-06-18. See §8 for the forward roadmap.
+Repo: `github.com/lums658/hpxpy`. Created 2026-06-04; last validated 2026-06-18.
 
 A from-scratch reimplementation of HPXPy: a NumPy-compatible Python array library
 backed by the HPX C++ runtime, built incrementally with correctness + benchmark gates
@@ -247,38 +249,83 @@ defines the local==CI gate so "works locally" == "passes CI".
 ## 8. Phased roadmap (milestones, each gated by §5/§6)
 
 ### Phase 1 — Wrap HPX; validate zero abstraction penalty (NO NumPy in the data path)
-- **M0 — Substrate.** (done) Repo + build (installed HPX) + CI + `env.sh` + harness + C++
-  baseline. Exit: package builds & imports; CI green.
-- **M1 — Array core.** (done) `Array` = `hpx::compute::vector<double, block_allocator>`
-  wrapper + introspection (`size`/`ndim`) + HPX-native construction
-  (`zeros`/`full`/`arange`), NUMA-aware first-touch. **No NumPy.**
-- **M2 — Reductions.** (done) `sum`/`min`/`max`/`dot` as wrapped HPX algorithms; first
-  zero-penalty validation vs C++ (≈1.0), correctness via analytic values.
-- **M3 — Transforms / element-wise.** (done) element-wise `add/sub/mul/div` + operators,
-  scalar broadcast, `sort`/`copy`/`cumsum`/`is_sorted` — all penalty ≈1.0.
-- **Slice/view model.** (done) `a[i]`, `a[i:j]` contiguous memory-sharing views,
-  `a[i]=x` (offset in Array; numpy view semantics; `step!=1` deferred → bead `x7i`).
-- **M5 — Sparse (SpMV/SpMM).** (done) CSR `CsrMatrix` + `laplacian_1d`; `DenseMatrix`;
-  `spmv`/`spmm` + `A@x` / `A@B`, kernel-timed penalty ≈1.0.
-- **M4a — Distributed runtime.** (done, PR #33) multi-locality via the TCP parcelport (no HPX
-  rebuild); `num_localities`/`locality_id`/`is_console`/`is_worker`/`distributed_sum`
-  (all_reduce); worker-aware startup; 2-locality validated in CI.
 
-**Phase-1 + NumPy-bridge status:** the single-locality op set is wrapped at measured ~0
-abstraction penalty (M1–M3, slices/strided, M5); the zero-copy NumPy bridge + drop-in parity
-suite landed; the distributed runtime is up. ~302 tests, 100% coverage.
+- **M0 — Substrate.** DONE. Repo + build (installed HPX) + CI + `env.sh` + harness + C++
+  baseline. Package builds and imports; CI green.
+- **M1 — Array core.** DONE. `Array` = `hpx::compute::vector<T, block_allocator>` wrapper +
+  introspection (`size`/`ndim`) + HPX-native construction (`zeros`/`full`/`arange`), NUMA-aware
+  first-touch.
+- **M2 — Reductions.** DONE. `sum`/`min`/`max`/`dot` as wrapped HPX algorithms; zero-penalty
+  validation vs C++ (≈1.0).
+- **M3 — Transforms / element-wise.** DONE. Element-wise `add/sub/mul/div` + operators, scalar
+  broadcast, `sort`/`copy`/`cumsum`/`is_sorted` — all penalty ≈1.0.
+- **Slice/view model.** DONE. Multi-axis slicing with full start/stop/step/negative-index support,
+  ellipsis expansion, strided views, zero-copy memory sharing.
+- **M5 — Sparse (SpMV/SpMM).** DONE. CSR `CsrMatrix` + `laplacian_1d`; `DenseMatrix`;
+  `spmv`/`spmm` + `A@x`/`A@B`, kernel-timed penalty ≈1.0.
+- **M4a — Distributed runtime.** DONE. Multi-locality via the TCP parcelport (no HPX rebuild);
+  `num_localities`/`locality_id`/`is_console`/`is_worker`/`distributed_sum` (all-reduce);
+  worker-aware startup; 2-locality validated in CI.
 
-### Post-Phase-1 roadmap — usability → distributed → GPU
-The next arc targets a NumPy-faithful experience that scales across all resources with no
-performance tax (decentralized HPX; eager/interactive):
-- **Phase A — single-node usability** (current): **N-D arrays** (epic `hpxpy-3ur`, staged) →
-  **dtypes** (float32/int64; resolves DECIDE #4) → eager/deferred behavior + pip-installable
-  wheels. The adoption foundation.
-- **Phase B — distributed data type:** global-view `Array` over `hpx::partitioned_vector` +
-  segmented reductions (transparent partitioning); the M4a runtime is the substrate.
-- **Phase C — GPU + heterogeneity:** device `compute::vector` (Kokkos/CUDA), CPU↔GPU↔node
-  async overlap, DLPack / Array-API interop. Sequencing: **B before C**.
-- **Validation/demos:** example + tutorial notebooks spanning the arc, once the wrapper is solid.
+### Phase A — Single-node usability (current / recently completed)
+
+- **N-D arrays.** DONE. N-D constructors (`zeros`/`ones`/`full`/`arange`/`linspace`/`eye`/
+  `identity`/`empty` and `*_like` variants) accept a shape tuple; multi-index get/set; row-major
+  layout; all ops generalised to N-D.
+- **Dtypes.** DONE. float64, float32, int64 throughout; NumPy-faithful type promotion for all
+  binary ops (array×array and array×scalar); `astype`; `from_numpy`/`to_numpy` bridge covers all
+  three dtypes.
+- **Views.** DONE. `transpose`/`.T`; `reshape`/`ravel`; `squeeze`; `expand_dims` — all zero-copy
+  where possible.
+- **Broadcasting.** DONE. NumPy-style N-D broadcasting for `+  -  *  /  **  %  //` and all
+  ufuncs; mixed-dtype broadcasting follows promotion rules.
+- **Wave-1 ufuncs.** DONE. `negative`/`abs`/`sign`/`sqrt`/`exp`/`log`/`sin`/`cos`/`tan`/
+  `floor`/`ceil`/`trunc`/`round`/`rint` (unary); `maximum`/`minimum`/`power`/`mod`/
+  `floor_divide`/`clip` (binary and clip).
+- **Wave-2 reductions.** DONE. `mean`/`prod`/`any`/`all`/`count_nonzero`; axis/keepdims for
+  `sum`/`min`/`max`/`mean`/`prod`; `matmul`/`@` operator.
+- **NumPy bridge + parity suite.** DONE. Zero-copy `to_numpy`; `from_numpy` (copy or borrow);
+  `__array__` protocol; drop-in parity test suite.
+- **CI.** DONE. Self-hosted Rostam runner; `ci.yml` (build-test + distributed); `bench.yml`
+  (perf/penalty); `docs.yml` (GitHub Pages). ~302 tests, 100% coverage.
+
+### Forward roadmap
+
+**Wave 3 — comparisons and boolean arrays** (partial; next)
+- DONE: `where(condition, x, y)` — element-wise select, any dtype condition.
+- DONE: `cumprod`, `argsort`, `std`, `var`.
+- DONE: `exp2`, `log2`, `log10`, `sinh`, `cosh`, `tanh`, `square` (pure Python).
+- DONE: `hpx.random` submodule — splitmix64 RNG, `rand`/`randn`/`uniform`/`randint`,
+  reproducible seeds (`seed()`/`get_seed()`/`get_state()`/`set_state()`).
+- DONE: TU split (`feat/build-tu-split` — `src/bind_*.cpp` per-feature files, PCH).
+- Remaining: comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`) returning bool
+  arrays; bool dtype; `nonzero`; per-axis `any`/`all`/`count_nonzero`.
+
+**Wave 4 — broader NumPy coverage**
+- `concatenate`/`stack`/`split`/`tile`/`repeat`.
+- Advanced indexing (integer-array indexing, boolean masking).
+- `argmin`/`argmax`; `flip`; `searchsorted`; `percentile`.
+
+**Wave 5 — build distribution**
+- `sdist` + documented `find_package(HPX)` build path; conda recipe; evaluate container
+  artifact. Pip wheels require a bundled or pre-installed HPX; exact distribution model TBD.
+
+**Wave 6 — ecosystem and interop**
+- `__dlpack__`/`__dlpack_device__` for zero-copy to PyTorch/JAX/CuPy.
+- Array API standard compliance (`__array_namespace__`).
+- Benchmark dashboard: committed CSVs + generated plots; abstraction-penalty history.
+
+**Phase B — distributed global-view Array**
+- `Array` over `hpx::partitioned_vector` + segmented reductions (transparent partitioning
+  across localities). The M4a multi-locality runtime is the substrate.
+- Collective ops (broadcast, gather, scatter, all-reduce) over partitioned arrays.
+- `distributed_sum` is the current proof-of-concept; the data-parallel distributed array
+  is this phase's deliverable.
+
+**Phase C — GPU and heterogeneity** (after Phase B)
+- Device `compute::vector` (Kokkos/CUDA executor), CPU↔GPU async overlap.
+- DLPack / Array-API interop for GPU tensors.
+- Sequencing: Phase B before Phase C.
 
 ---
 

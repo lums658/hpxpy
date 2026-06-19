@@ -26,15 +26,53 @@ message(STATUS "hpxpy: found HPX ${HPX_VERSION} at ${HPX_DIR}")
 
 # --- The extension ----------------------------------------------------------
 # nanobind size-optimizes extensions with -Os by default. But the HPX reduce/
-# compute templates inline into THIS translation unit, and -Os de-optimizes that
+# compute templates inline into THESE translation units, and -Os de-optimizes that
 # numeric kernel (~2x slower than the -O3 C++ baseline, worst single-threaded; the
 # cpp_baseline/diag ladder shows the wrapper itself adds 0 penalty). NOMINSIZE
-# drops the -Os entirely so the Release -O3 stands and the penalty is ~1.0.
-nanobind_add_module(_core NOMINSIZE src/_core.cpp)
+# drops the -Os entirely so the Release -O3 stands and the penalty is ~1.0. NOMINSIZE
+# applies to the whole target, so EVERY bind_*.cpp below is compiled with -O3.
+#
+# BUILD VELOCITY: the bindings were one giant TU (src/_core.cpp #including
+# array.hpp's inline templated kernels), so a single cc1plus instantiated every
+# dispatch_dtype lambda x3 dtypes single-threaded (~11-14 min) while 23 cores idled.
+# The .def(...) registrations now live in per-feature bind_*.cpp TUs (each
+# instantiating only its kernel subset); ninja -j compiles them in parallel. Pure
+# build refactor — the registered bindings are byte-for-byte identical.
+nanobind_add_module(_core NOMINSIZE
+  src/_core.cpp
+  src/bind_runtime.cpp
+  src/bind_reductions.cpp
+  src/bind_elementwise.cpp
+  src/bind_ufuncs.cpp
+  src/bind_wave1_reductions.cpp
+  src/bind_indexing.cpp
+  src/bind_views.cpp
+  src/bind_construction.cpp
+  src/bind_bridge.cpp
+  src/bind_sparse.cpp
+  src/bind_bench.cpp
+  src/bind_random.cpp)
 target_link_libraries(_core PRIVATE
   HPX::hpx
   HPX::wrap_main
   HPX::iostreams_component)
 target_compile_features(_core PRIVATE cxx_std_20)
+
+# Precompile the heavy HPX + nanobind headers ONCE and reuse the result across every
+# bind_*.cpp. The HPX headers dominate each TU's front-end cost; building the PCH once
+# (instead of re-parsing hpx/hpx.hpp etc. per TU) is a large additional win on top of
+# the parallelism. The PCH is compiled with the same target flags (NOMINSIZE/-O3).
+target_precompile_headers(_core PRIVATE
+  <hpx/hpx.hpp>
+  <hpx/algorithm.hpp>
+  <hpx/numeric.hpp>
+  <hpx/execution.hpp>
+  <hpx/hpx_start.hpp>
+  <nanobind/nanobind.h>
+  <nanobind/ndarray.h>
+  <nanobind/stl/string.h>
+  <nanobind/stl/vector.h>
+  <nanobind/stl/pair.h>
+  <nanobind/stl/tuple.h>)
 
 install(TARGETS _core LIBRARY DESTINATION hpxpy)
