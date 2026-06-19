@@ -60,18 +60,36 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+On Rostam (the supported environment):
 
 ```bash
-# Example:
-# npm install
-# npm test
+source env.sh            # toolchain (gcc 15, Boost 1.90, Python 3.13) + HPX paths
+bash scripts/check.sh    # editable build + ruff + pytest (100% coverage) — the local==CI gate
 ```
+
+- HPX is found via `find_package(HPX)` (`HPX_DIR` / `CMAKE_PREFIX_PATH` come from `env.sh`).
+- The pinned HPX install is built with **AVX-512** — run on an AVX-512 node (Rostam
+  **medusa**). The AMD **buran** login nodes lack AVX-512 and will **SIGILL** at HPX load.
+- Tests and benchmarks need the tcmalloc preload at runtime: `LD_PRELOAD=$HPXPY_TCMALLOC`.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+A thin nanobind wrapper over HPX:
+
+- `src/array.hpp` — one runtime-dtype N-D `Array` (`shape_` / `strides_` over a NUMA-aware
+  `hpx::compute::vector` with `block_allocator` first-touch). Each operation is a single HPX
+  parallel algorithm; `dispatch_dtype` instantiates kernels per element type (f64/f32/i64).
+- `src/_core.cpp` — the nanobind binding (`_core`); `hpxpy/` — the Python package.
+- `cpp_baseline/` — the hand-written C++-HPX baseline + the in-binary L0/L1 penalty ladder
+  (`diag`); `benchmarks/` — the runner, results, and `BENCHMARK_PLAN.md`.
+- `docs/PLAN.md` — the design contract (vision, phasing, the zero-penalty methodology).
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- **Zero abstraction penalty is the contract.** Every op mirrors a raw HPX algorithm; the
+  `cpp_baseline/diag` L0/L1 ladder must stay ≈1.0. Keep the contiguous fast paths intact.
+- **NumPy is the oracle.** Tests compare against NumPy; `scripts/check.sh` must be green
+  (ruff + pytest + 100% coverage) before opening a PR.
+- **`NOMINSIZE`** in `CMakeLists.txt` keeps `-O3` on the extension (don't let nanobind
+  force `-Os`, which silently re-introduces the penalty).
+- Commits have **no AI-attribution trailer**.

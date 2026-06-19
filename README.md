@@ -6,12 +6,20 @@ runtime — array operations *are* real HPX parallel algorithms, with a measured
 
 📖 **Docs:** https://lums658.github.io/hpxpy/
 
-> **Status: Phase 1 (thin HPX wrapper).** Done and merged, each at ~zero abstraction
-> penalty (1→40 threads, vs a C++ HPX baseline): the NUMA-aware `Array`
-> (`zeros`/`full`/`arange`), reductions (`sum`/`min`/`max`/`dot`), element-wise +
-> scalar ops (`a*b`, `a + 2.0`, …), `sort`/`copy`/`cumsum`, and contiguous slice
-> **views** (`a[i]`, `a[i:j]`). NumPy compatibility is a separate, later phase.
-> See [docs/PLAN.md](docs/PLAN.md) for architecture + process.
+> **Status: single-node NumPy surface — merged and zero-penalty.** Over the NUMA-aware
+> `Array`:
+> - **N-D arrays** in **float64 / float32 / int64** with NumPy **type promotion**
+> - construction: `zeros`/`ones`/`full`/`arange`/`linspace`/`eye`/`empty` + `*_like`
+> - indexing + multi-axis **slicing** (ellipsis, negative steps) and zero-copy **views**
+>   (`transpose`/`.T`/`reshape`/`ravel`/`squeeze`/`expand_dims`)
+> - **broadcasting** `+ - * /`; **ufuncs** (`sqrt`/`exp`/`log`/`sin`/`cos`/`abs`/`clip`/
+>   `maximum`/`minimum`/`power`/…); **reductions** (`sum`/`min`/`max`/`mean`/`prod`/`any`/
+>   `all` with `axis=`/`keepdims=`), `dot`, **`matmul` / `@`**; `sort`/`cumsum`
+> - zero-copy **NumPy bridge** (`from_numpy`/`to_numpy`/`__array__`); sparse CSR (`spmv`/`spmm`)
+>
+> Abstraction penalty stays **≈1.0** — verified single-thread, scaling to 40 cores, and at
+> the memory/compute roofline. *Not yet:* comparisons / `where` / bool dtype, fancy indexing,
+> a distributed global-view array, GPU, and pip wheels. See [docs/PLAN.md](docs/PLAN.md).
 
 ## Goals
 
@@ -20,8 +28,8 @@ runtime — array operations *are* real HPX parallel algorithms, with a measured
   measured every iteration against a hand-written baseline.
 - **Backed by HPX**: one array type over a NUMA-aware `hpx::compute::vector`
   (`block_allocator`, parallel first-touch) — no hidden serial fallbacks.
-- **NumPy semantics** for what exists (`a.sort()` in place, `np.sort(a)` copy, views) ;
-  a full NumPy-compatible bridge is Phase 2.
+- **NumPy-faithful**: NumPy semantics and dtype promotion across the surface, with a
+  zero-copy `from_numpy` / `to_numpy` bridge for interop.
 
 ## Requirements
 
