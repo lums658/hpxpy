@@ -1597,12 +1597,50 @@ private:
     Array scalar_arith_(double s, F f) const
     {
         if (dt_ == DType::I64)
-            return astype(DType::F64).unary(
-                [s, f](auto x) { return f(x, static_cast<double>(s)); });
+            // FUSED FLOAT-PROMOTION FAST PATH (zero-penalty). numpy: int64_arr * 2.0
+            // -> float64 (promote by the scalar's TYPE, not value). The old code did
+            // astype(F64) (one int64->float64 conversion pass) THEN unary() (a second
+            // pass), i.e. TWO passes over n elements. promote_scalar_() fuses both into
+            // a SINGLE pass: read each int64, cast to double, apply f, write float64 —
+            // one read + one write, matching the L0 single-pass kernel's bandwidth.
+            // Result dtype is still float64 (numpy-faithful; the dtype gate is unchanged).
+            return promote_scalar_f64_(s, f);
         return unary([s, f](auto x) {
             using T = decltype(x);
             return f(x, static_cast<T>(s));
         });
+    }
+
+    // Fused int64 -> float64 scalar arithmetic: a single pass that casts each int64
+    // element to double, applies f(x_double, s), and writes a float64 result. Replaces
+    // the former two-pass astype(F64).unary(...) for an I64 array with a float scalar.
+    // Handles contiguous (raw range) and non-contiguous (strided unravel) inputs.
+    template <typename F>
+    Array promote_scalar_f64_(double s, F f) const
+    {
+        Array out;
+        out.alloc_nd_(shape_, size_, 0.0, DType::F64);
+        if (size_ == 0)
+            return out;
+        std::int64_t const* src = data_as<std::int64_t>();
+        double* dst = out.template data_as<double>();
+        if (is_contiguous()) {
+            hpx::transform(hpx::execution::par, src, src + size_, dst,
+                [s, f](std::int64_t v) {
+                    return f(static_cast<double>(v), s);
+                });
+        } else {
+            auto aux = inner_volumes(shape_);
+            auto const& sh = shape_;
+            auto const& st = strides_;
+            hpx::experimental::for_loop(hpx::execution::par,
+                std::size_t(0), size_,
+                [src, dst, &sh, &st, &aux, s, f](std::size_t i) {
+                    dst[i] = f(static_cast<double>(
+                        src[flat_to_offset(i, sh, st, aux)]), s);
+                });
+        }
+        return out;
     }
 
     // Arithmetic with a Python INT scalar: preserve the array dtype (I64 stays I64,
@@ -1671,6 +1709,64 @@ private:
         if (throw_empty && red_size == 0)
             throw std::invalid_argument(
                 "axis reduction over an empty axis is undefined (min/max)");
+
+        // FAST PATH (zero-penalty): a 2-D array reduced over a single axis, with
+        // regular row-major strides (strides_[1]==1, strides_[0]==shape_[1]). This
+        // is the overwhelmingly common case (sum/min/max over rows or cols of a
+        // contiguous matrix). The general path below unravels each (kept,red) index
+        // via integer div/mod per inner element; here both index spaces are 1-D so
+        // we walk them with plain stride arithmetic (the same `i*st0 + j*st1` the L0
+        // reference uses), skipping all div/mod. Identical numeric result.
+        if (nd == 2 && axes.size() == 1 &&
+            strides_.size() == 2 && strides_[1] == 1 &&
+            strides_[0] == static_cast<std::ptrdiff_t>(shape_[1])) {
+            std::size_t red_ax = red_axes[0];      // 0 or 1
+            return dispatch_dtype(dt_, [&](auto tag) -> Array {
+                using T = decltype(tag);
+                T identity = make_identity(T{});
+                Array out;
+                out.alloc_nd_(out_shape, out_size,
+                    static_cast<double>(identity), dt_);
+                if (out_size == 0 || red_size == 0)
+                    return out;
+                T const* b = data_as<T>();
+                T* dst = out.template data_as<T>();
+                std::ptrdiff_t st0 = strides_[0];
+                std::ptrdiff_t st1 = strides_[1];
+                if (red_ax == 0) {
+                    // reduce over rows -> out[j] = combine_i a[i*st0 + j*st1]
+                    // out_i indexes the kept axis (cols), inner walks rows.
+                    hpx::experimental::for_loop(hpx::execution::par,
+                        std::size_t(0), out_size,
+                        [b, dst, red_size, st0, st1, identity, combine]
+                        (std::size_t out_i) {
+                            std::ptrdiff_t base_off =
+                                static_cast<std::ptrdiff_t>(out_i) * st1;
+                            T acc = identity;
+                            for (std::size_t i = 0; i < red_size; ++i)
+                                acc = combine(acc,
+                                    b[base_off + static_cast<std::ptrdiff_t>(i) * st0]);
+                            dst[out_i] = acc;
+                        });
+                } else {
+                    // reduce over cols -> out[i] = combine_j a[i*st0 + j*st1]
+                    // out_i indexes the kept axis (rows), inner walks cols.
+                    hpx::experimental::for_loop(hpx::execution::par,
+                        std::size_t(0), out_size,
+                        [b, dst, red_size, st0, st1, identity, combine]
+                        (std::size_t out_i) {
+                            std::ptrdiff_t base_off =
+                                static_cast<std::ptrdiff_t>(out_i) * st0;
+                            T acc = identity;
+                            for (std::size_t j = 0; j < red_size; ++j)
+                                acc = combine(acc,
+                                    b[base_off + static_cast<std::ptrdiff_t>(j) * st1]);
+                            dst[out_i] = acc;
+                        });
+                }
+                return out;
+            });
+        }
 
         return dispatch_dtype(dt_, [&](auto tag) -> Array {
             using T = decltype(tag);
