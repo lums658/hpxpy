@@ -1,10 +1,15 @@
 # HPXPy (rewrite) — Plan & Process
 
-**Status:** ACTIVE. Phase 1 (thin HPX wrapper, single-locality) complete — M1–M3, slices +
-strided views, and M5 sparse (SpMV/SpMM), all at ~0 abstraction penalty; the NumPy bridge +
-drop-in parity suite landed; **M4a distributed runtime merged** (multi-locality via the TCP
-parcelport). Now in **Phase A (single-node usability)**, starting with N-D arrays — see §8.
-Repo: `github.com/lums658/hpxpy`. Created 2026-06-04; last validated 2026-06-10.
+**Status:** ACTIVE. Phase 1 (thin HPX wrapper) complete, and **Phase A (single-node
+usability) largely done**: **N-D arrays**, the **dtype epic** (float32/int64 + NumPy type
+promotion), and a first wave of broader NumPy (ufuncs, `mean`/`prod`/`any`/`all`, the
+construction helpers, `matmul`/`@`) — all merged at ~0 abstraction penalty, re-verified
+single-thread, scaling to 40 cores, and at the memory/compute roofline (see
+`benchmarks/BENCHMARK_PLAN.md`). M5 sparse (SpMV/SpMM) and the **M4a distributed runtime**
+(multi-locality, TCP parcelport) are merged. **Next:** more NumPy breadth
+(comparisons/`where`/bool dtype, indexing, concatenate), then a distributed global-view
+array (Phase B) and GPU (Phase C). Repo: `github.com/lums658/hpxpy`.
+Created 2026-06-04; last validated 2026-06-19.
 
 A from-scratch reimplementation of HPXPy: a NumPy-compatible Python array library
 backed by the HPX C++ runtime, built incrementally with correctness + benchmark gates
